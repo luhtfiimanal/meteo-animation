@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>POC 5 - WebGL + WASM Leaflet Integration</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; }
+        #map { height: 100%; }
+        #stats {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+            background: rgba(0, 0, 0, 0.85);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            font-size: 13px;
+            min-width: 200px;
+        }
+        #stats h3 {
+            color: #60a5fa;
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 6px;
+        }
+        .stat-label { color: #a0aec0; }
+        .stat-value { color: #60a5fa; font-family: monospace; }
+        .divider {
+            border-top: 1px solid #333;
+            margin: 10px 0;
+        }
+        #error {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 2000;
+            background: #7f1d1d;
+            color: #fecaca;
+            padding: 24px;
+            border-radius: 8px;
+            display: none;
+            max-width: 400px;
+        }
+        /* Canvas is positioned via JS, outside Leaflet panes */
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <div id="stats">
+        <h3>POC 5: Leaflet + WASM</h3>
+        <div class="stat-row">
+            <span class="stat-label">FPS:</span>
+            <span class="stat-value" id="fps">0</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Particles:</span>
+            <span class="stat-value" id="particleCount">0</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Zoom:</span>
+            <span class="stat-value" id="zoomLevel">0</span>
+        </div>
+        <div class="divider"></div>
+        <div class="stat-row">
+            <span class="stat-label">Speed Factor:</span>
+            <span class="stat-value" id="speedFactor">0</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">View Scale:</span>
+            <span class="stat-value" id="viewScale">0</span>
+        </div>
+        <div class="divider"></div>
+        <div style="font-size: 11px; color: #666; margin-top: 5px;">
+            <div>Center: <span id="dbgCenter">-</span></div>
+            <div>Mercator: <span id="dbgMercator">-</span></div>
+        </div>
+    </div>
+    <div id="error"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script type="module">
+        import init, {
+            ParticleSimulator,
+            WindSampler,
+            TrailManager,
+            TrailVertexBuilder
+        } from './wasm/meteo_animation_wasm.js';
+
+        // =========================================================================
+        // POC 5: Leaflet + WebGL + WASM
+        // =========================================================================
+        //
+        // Key Features:
+        // 1. Leaflet map with OSM tiles
+        // 2. Wind particles as canvas overlay
+        // 3. Zoom-based particle count & speed scaling
+        // 4. Fractional zoom support
+        // 5. Web Mercator coordinate sync
+        //
+        // =========================================================================
+
+        // === CONSTANTS ===
+        const EARTH_RADIUS = 6378137;
+        const MAX_LAT = 85.051129;
+        const TRAIL_LENGTH = 16;
+        const MAX_AGE = 100;
+
+        // Wind texture geographic extent (Indonesia region)
+        const WIND_LON_MIN = 80;
+        const WIND_LON_MAX = 160;
+        const WIND_LAT_MIN = -20;
+        const WIND_LAT_MAX = 20;
+        const WIND_TEX_SIZE = 256;
+
+        // === ZOOM SCALING TABLES ===
+        const ZOOM_PARTICLES = {
+            3: 16000, 4: 12000, 5: 8000, 6: 4000, 7: 2500,
+            8: 1500, 9: 1000, 10: 600, 11: 400, 12: 300, 13: 200, 14: 100
+        };
+        const ZOOM_SPEED = {
+            3: 60000, 4: 45000, 5: 30000, 6: 15000, 7: 8000,
+            8: 4000, 9: 2000, 10: 1000, 11: 700, 12: 500, 13: 300, 14: 200
+        };
+
+        function getZoomScaledValue(zoom, table) {
+            const keys = Object.keys(table).map(Number).sort((a, b) => a - b);
+            if (zoom <= keys[0]) return table[keys[0]];
+            if (zoom >= keys[keys.length - 1]) return table[keys[keys.length - 1]];
+
+            for (let i = 0; i < keys.length - 1; i++) {
+                if (zoom >= keys[i] && zoom <= keys[i + 1]) {
+                    const t = (zoom - keys[i]) / (keys[i + 1] - keys[i]);
+                    return table[keys[i]] * (1 - t) + table[keys[i + 1]] * t;
+                }
+            }
+            return table[keys[0]];
+        }
+
+        // === COORDINATE CONVERSION ===
+        function latLngToMercator(lat, lng) {
+            const x = lng * Math.PI / 180 * EARTH_RADIUS;
+            const latRad = Math.max(-MAX_LAT, Math.min(MAX_LAT, lat)) * Math.PI / 180;
+            const y = Math.log(Math.tan(Math.PI / 4 + latRad / 2)) * EARTH_RADIUS;
+            return { x, y };
+        }
+
+        // Wind texture bounds in Web Mercator
+        const WIND_BOUNDS = {
+            min: latLngToMercator(WIND_LAT_MIN, WIND_LON_MIN),
+            max: latLngToMercator(WIND_LAT_MAX, WIND_LON_MAX)
+        };
+
+        // === WIND TEXTURE GENERATION ===
+        function generateWindTexture(size) {
+            const data = new Uint8Array(size * size * 4);
+
+            // Create multiple vortices for realistic wind patterns
+            const vortices = [
+                { x: 0.3, y: 0.4, strength: 12, clockwise: true },   // Cyclone
+                { x: 0.7, y: 0.6, strength: 10, clockwise: false },  // Anticyclone
+                { x: 0.5, y: 0.3, strength: 8, clockwise: true },    // Small cyclone
+            ];
+
+            // Simple land mask (approximate Indonesia outline)
+            function isLand(u, v) {
+                // Approximate land areas (very simplified)
+                const lon = WIND_LON_MIN + u * (WIND_LON_MAX - WIND_LON_MIN);
+                const lat = WIND_LAT_MIN + (1 - v) * (WIND_LAT_MAX - WIND_LAT_MIN);
+
+                // Borneo
+                if (lon > 108 && lon < 119 && lat > -4 && lat < 7) return true;
+                // Sumatra
+                if (lon > 95 && lon < 106 && lat > -6 && lat < 6) return true;
+                // Java
+                if (lon > 105 && lon < 114 && lat > -8.5 && lat < -5.5) return true;
+                // Sulawesi
+                if (lon > 118 && lon < 125 && lat > -6 && lat < 2) return true;
+                // Papua
+                if (lon > 130 && lon < 141 && lat > -9 && lat < 0) return true;
+                // Philippines
+                if (lon > 116 && lon < 127 && lat > 5 && lat < 20) return true;
+
+                return false;
+            }
+
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    const idx = (y * size + x) * 4;
+                    const u = x / size;
+                    const v = y / size;
+
+                    if (isLand(u, v)) {
+                        // NaN region (land)
+                        data[idx + 0] = 128;
+                        data[idx + 1] = 128;
+                        data[idx + 2] = 0;
+                        data[idx + 3] = 0;
+                    } else {
+                        // Calculate wind from vortices
+                        let windU = 0, windV = 0;
+
+                        for (const vortex of vortices) {
+                            const dx = u - vortex.x;
+                            const dy = v - vortex.y;
+                            const dist = Math.sqrt(dx * dx + dy * dy) + 0.01;
+                            const falloff = Math.min(1, 0.15 / dist);
+                            const angle = Math.atan2(dy, dx) + (vortex.clockwise ? Math.PI / 2 : -Math.PI / 2);
+
+                            windU += Math.cos(angle) * vortex.strength * falloff;
+                            windV += Math.sin(angle) * vortex.strength * falloff;
+                        }
+
+                        // Add some base easterly trade winds
+                        windU += 3;
+                        windV += Math.sin(v * Math.PI * 2) * 2;
+
+                        // Encode: (value + 15) / 30 * 255
+                        const encodeWind = (val) => Math.floor(Math.max(0, Math.min(255, (val + 15) / 30 * 255)));
+                        const speed = Math.sqrt(windU * windU + windV * windV);
+
+                        data[idx + 0] = encodeWind(windU);
+                        data[idx + 1] = encodeWind(windV);
+                        data[idx + 2] = Math.floor(Math.min(255, speed / 15 * 255));
+                        data[idx + 3] = 255;
+                    }
+                }
+            }
+
+            return data;
+        }
+
+        // === SHADERS ===
+        const BG_VERTEX_SHADER = `#version 300 es
+            out vec2 v_clipPos;
+            void main() {
+                vec2 positions[6] = vec2[](
+                    vec2(-1, -1), vec2(1, -1), vec2(-1, 1),
+                    vec2(-1, 1), vec2(1, -1), vec2(1, 1)
+                );
+                gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);
+                v_clipPos = positions[gl_VertexID];
+            }
+        `;
+
+        const BG_FRAGMENT_SHADER = `#version 300 es
+            precision mediump float;
+            in vec2 v_clipPos;
+            out vec4 fragColor;
+
+            uniform sampler2D u_wind_texture;
+            uniform vec2 u_clip_per_meter;  // Scale: clip units per meter
+            uniform vec2 u_translate;       // Translation in clip space
+            uniform vec2 u_texture_bounds_min;
+            uniform vec2 u_texture_bounds_max;
+
+            void main() {
+                // Clip -> World (inverse of projection)
+                // clip = world * clipPerMeter + translate
+                // world = (clip - translate) / clipPerMeter
+                vec2 world = (v_clipPos - u_translate) / u_clip_per_meter;
+
+                // World -> TexCoord
+                vec2 texCoord = (world - u_texture_bounds_min) / (u_texture_bounds_max - u_texture_bounds_min);
+
+                // Check out of bounds
+                if (texCoord.x < 0.0 || texCoord.x > 1.0 || texCoord.y < 0.0 || texCoord.y > 1.0) {
+                    fragColor = vec4(0.0);  // Transparent outside wind bounds
+                    return;
+                }
+
+                vec4 wind = texture(u_wind_texture, texCoord);
+                if (wind.a < 0.5) {
+                    // Land/NaN - semi-transparent gray
+                    fragColor = vec4(0.2, 0.2, 0.25, 0.3);
+                } else {
+                    // Valid wind - subtle color based on magnitude
+                    float mag = wind.b;
+                    fragColor = vec4(0.1, 0.15, 0.25, 0.2 + mag * 0.1);
+                }
+            }
+        `;
+
+        const TRAIL_VERTEX_SHADER = `#version 300 es
+            precision highp float;
+
+            in vec2 a_position;      // World coordinates (Web Mercator)
+            in float a_alpha;
+            in vec3 a_color;
+
+            // Projection matrix components
+            uniform vec2 u_clip_per_meter;  // Scale: clip units per meter
+            uniform vec2 u_translate;       // Translation in clip space
+
+            out vec4 v_color;
+
+            void main() {
+                // World -> Clip (simple matrix multiply)
+                vec2 clip = a_position * u_clip_per_meter + u_translate;
+
+                gl_Position = vec4(clip, 0.0, 1.0);
+                v_color = vec4(a_color, a_alpha);
+            }
+        `;
+
+        const TRAIL_FRAGMENT_SHADER = `#version 300 es
+            precision mediump float;
+            in vec4 v_color;
+            out vec4 fragColor;
+
+            void main() {
+                fragColor = v_color;
+            }
+        `;
+
+        // === SHADER HELPERS ===
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error('Shader compile error:', gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+        function createProgram(gl, vs, fs) {
+            const program = gl.createProgram();
+            gl.attachShader(program, vs);
+            gl.attachShader(program, fs);
+            gl.linkProgram(program);
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error('Program link error:', gl.getProgramInfoLog(program));
+                gl.deleteProgram(program);
+                return null;
+            }
+            return program;
+        }
+
+        // === MAIN ===
+        async function main() {
+            // Initialize WASM
+            const wasm = await init();
+
+            // Create Leaflet map with fractional zoom
+            const map = L.map('map', {
+                zoomSnap: 0,           // Allow any zoom level
+                zoomDelta: 0.5,        // +/- button step
+                wheelPxPerZoomLevel: 120,  // Smooth scroll zoom
+            }).setView([0, 120], 5);   // Center on Indonesia
+
+            // Add OSM tiles
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; OpenStreetMap contributors',
+                maxZoom: 18,
+            }).addTo(map);
+
+            // Create WebGL canvas OUTSIDE of Leaflet panes
+            // This prevents double-transform (Leaflet pane + shader)
+            const canvas = document.createElement('canvas');
+            canvas.id = 'windCanvas';
+            canvas.style.position = 'absolute';
+            canvas.style.top = '0';
+            canvas.style.left = '0';
+            canvas.style.zIndex = '450';
+            canvas.style.pointerEvents = 'none';
+            map.getContainer().appendChild(canvas);
+
+            // === ZOOM ANIMATION SYNC ===
+            // During Leaflet zoom animation, tiles get CSS transform.
+            // We apply matching CSS transform to canvas, freeze projection updates.
+            let isZoomAnimating = false;
+
+            map.on('zoomanim', function(e) {
+                const scale = map.getZoomScale(e.zoom, map.getZoom());
+
+                // Only apply CSS transform for zoom IN (scale > 1)
+                // For zoom OUT, the edges would shrink and show gaps
+                // Better to let projection update handle it (slight desync but no visual artifacts)
+                if (scale <= 1) {
+                    isZoomAnimating = false;
+                    return;
+                }
+
+                isZoomAnimating = true;
+
+                const size = map.getSize();
+
+                // Current center is always at container center
+                const containerCenterX = size.x / 2;
+                const containerCenterY = size.y / 2;
+
+                // Target center in current container coords (before animation)
+                const targetCenterPx = map.latLngToContainerPoint(e.center);
+
+                // Offset from current center to target center
+                const offsetX = targetCenterPx.x - containerCenterX;
+                const offsetY = targetCenterPx.y - containerCenterY;
+
+                // Zoom origin: the point that stays fixed during animation
+                // It's calculated by: currentCenter + offset / (1 - 1/scale)
+                // This is how Leaflet calculates it internally
+                const denom = 1 - 1 / scale;
+                let originX, originY;
+
+                if (Math.abs(denom) < 0.0001) {
+                    originX = containerCenterX;
+                    originY = containerCenterY;
+                } else {
+                    originX = containerCenterX + offsetX / denom;
+                    originY = containerCenterY + offsetY / denom;
+                }
+
+                canvas.style.transformOrigin = `${originX}px ${originY}px`;
+                canvas.style.transform = `scale(${scale})`;
+            });
+
+            map.on('zoomend', function() {
+                isZoomAnimating = false;
+                // Reset CSS transform - projection will be updated in next frame
+                canvas.style.transform = '';
+                canvas.style.transformOrigin = '';
+            });
+
+            // Also handle zoom cancel (e.g., user interrupts animation)
+            map.on('moveend', function() {
+                if (isZoomAnimating) {
+                    isZoomAnimating = false;
+                    canvas.style.transform = '';
+                    canvas.style.transformOrigin = '';
+                }
+            });
+
+            const gl = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: false });
+            if (!gl) {
+                document.getElementById('error').textContent = 'WebGL 2 not supported!';
+                document.getElementById('error').style.display = 'block';
+                return;
+            }
+
+            // === CANVAS RESIZE ===
+            function resizeCanvas() {
+                const size = map.getSize();
+                canvas.width = size.x * window.devicePixelRatio;
+                canvas.height = size.y * window.devicePixelRatio;
+                canvas.style.width = size.x + 'px';
+                canvas.style.height = size.y + 'px';
+                gl.viewport(0, 0, canvas.width, canvas.height);
+            }
+            resizeCanvas();
+            map.on('resize', resizeCanvas);
+
+            // === VIEW STATE ===
+            // Use projection matrix approach like POC 5 WebGPU
+            let clipPerMeterX = 0;
+            let clipPerMeterY = 0;
+            let translateX = 0;
+            let translateY = 0;
+            let currentZoom = 5;
+            let currentParticleCount = getZoomScaledValue(5, ZOOM_PARTICLES);
+            let currentSpeedFactor = getZoomScaledValue(5, ZOOM_SPEED);
+
+            function updateViewState() {
+                // Skip during zoom animation - CSS transform handles visual sync
+                if (isZoomAnimating) return;
+
+                const center = map.getCenter();
+                const size = map.getSize();
+
+                // Get center in Web Mercator and screen coords
+                const centerMerc = latLngToMercator(center.lat, center.lng);
+                const centerPx = map.latLngToContainerPoint(center);
+
+                // Get a point 1 degree east to calculate X scale
+                const offsetLngLat = L.latLng(center.lat, center.lng + 1);
+                const offsetMerc = latLngToMercator(center.lat, center.lng + 1);
+                const offsetPx = map.latLngToContainerPoint(offsetLngLat);
+
+                // Pixels per meter (container pixels, not device pixels)
+                const pxPerMeterX = (offsetPx.x - centerPx.x) / (offsetMerc.x - centerMerc.x);
+
+                // Get a point 1 degree north to calculate Y scale
+                const offsetLatLngY = L.latLng(center.lat + 1, center.lng);
+                const offsetMercY = latLngToMercator(center.lat + 1, center.lng);
+                const offsetPxY = map.latLngToContainerPoint(offsetLatLngY);
+
+                const pxPerMeterY = (offsetPxY.y - centerPx.y) / (offsetMercY.y - centerMerc.y);
+
+                // Convert to clip space (account for device pixel ratio)
+                const dpr = window.devicePixelRatio;
+                clipPerMeterX = pxPerMeterX * dpr * 2 / (size.x * dpr);
+                clipPerMeterY = -pxPerMeterY * dpr * 2 / (size.y * dpr);  // Negate for Y flip
+
+                // Translation: where center point ends up in clip space
+                const centerClipX = (centerPx.x / size.x) * 2 - 1;
+                const centerClipY = 1 - (centerPx.y / size.y) * 2;
+
+                translateX = centerClipX - centerMerc.x * clipPerMeterX;
+                translateY = centerClipY - centerMerc.y * clipPerMeterY;
+
+                currentZoom = map.getZoom();
+                currentParticleCount = Math.floor(getZoomScaledValue(currentZoom, ZOOM_PARTICLES));
+                currentSpeedFactor = getZoomScaledValue(currentZoom, ZOOM_SPEED);
+
+                // Update debug info
+                document.getElementById('zoomLevel').textContent = currentZoom.toFixed(2);
+                document.getElementById('speedFactor').textContent = currentSpeedFactor.toFixed(0);
+                document.getElementById('viewScale').textContent = `${clipPerMeterX.toExponential(2)}`;
+                document.getElementById('dbgCenter').textContent = `${center.lat.toFixed(2)}, ${center.lng.toFixed(2)}`;
+                document.getElementById('dbgMercator').textContent = `${(centerMerc.x/1e6).toFixed(2)}M, ${(centerMerc.y/1e6).toFixed(2)}M`;
+            }
+
+            map.on('resize', resizeCanvas);
+            updateViewState();
+
+            // === BACKGROUND PROGRAM ===
+            const bgVs = createShader(gl, gl.VERTEX_SHADER, BG_VERTEX_SHADER);
+            const bgFs = createShader(gl, gl.FRAGMENT_SHADER, BG_FRAGMENT_SHADER);
+            const bgProgram = createProgram(gl, bgVs, bgFs);
+
+            const bgLocs = {
+                windTex: gl.getUniformLocation(bgProgram, 'u_wind_texture'),
+                clipPerMeter: gl.getUniformLocation(bgProgram, 'u_clip_per_meter'),
+                translate: gl.getUniformLocation(bgProgram, 'u_translate'),
+                texBoundsMin: gl.getUniformLocation(bgProgram, 'u_texture_bounds_min'),
+                texBoundsMax: gl.getUniformLocation(bgProgram, 'u_texture_bounds_max'),
+            };
+
+            // === TRAIL PROGRAM ===
+            const trailVs = createShader(gl, gl.VERTEX_SHADER, TRAIL_VERTEX_SHADER);
+            const trailFs = createShader(gl, gl.FRAGMENT_SHADER, TRAIL_FRAGMENT_SHADER);
+            const trailProgram = createProgram(gl, trailVs, trailFs);
+
+            const trailLocs = {
+                position: gl.getAttribLocation(trailProgram, 'a_position'),
+                alpha: gl.getAttribLocation(trailProgram, 'a_alpha'),
+                color: gl.getAttribLocation(trailProgram, 'a_color'),
+                clipPerMeter: gl.getUniformLocation(trailProgram, 'u_clip_per_meter'),
+                translate: gl.getUniformLocation(trailProgram, 'u_translate'),
+            };
+
+            // === TRAIL VAO & BUFFER ===
+            const trailVao = gl.createVertexArray();
+            gl.bindVertexArray(trailVao);
+
+            const trailBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, trailBuffer);
+
+            const FLOATS_PER_VERTEX = 6;
+            const STRIDE = FLOATS_PER_VERTEX * 4;
+            const MAX_PARTICLES = 20000;  // Max for zoom 3
+
+            gl.enableVertexAttribArray(trailLocs.position);
+            gl.vertexAttribPointer(trailLocs.position, 2, gl.FLOAT, false, STRIDE, 0);
+            gl.enableVertexAttribArray(trailLocs.alpha);
+            gl.vertexAttribPointer(trailLocs.alpha, 1, gl.FLOAT, false, STRIDE, 8);
+            gl.enableVertexAttribArray(trailLocs.color);
+            gl.vertexAttribPointer(trailLocs.color, 3, gl.FLOAT, false, STRIDE, 12);
+
+            const maxVertices = MAX_PARTICLES * (TRAIL_LENGTH - 1) * 6;
+            gl.bufferData(gl.ARRAY_BUFFER, maxVertices * STRIDE, gl.DYNAMIC_DRAW);
+
+            // === WASM OBJECTS ===
+            const simulator = new ParticleSimulator(MAX_PARTICLES);
+            const trails = new TrailManager(MAX_PARTICLES, TRAIL_LENGTH);
+            const vertexBuilder = new TrailVertexBuilder(MAX_PARTICLES, TRAIL_LENGTH);
+            const windSampler = new WindSampler(WIND_TEX_SIZE, WIND_TEX_SIZE);
+
+            // Set bounds to Web Mercator coordinates
+            windSampler.set_bounds(
+                WIND_BOUNDS.min.x, WIND_BOUNDS.min.y,
+                WIND_BOUNDS.max.x, WIND_BOUNDS.max.y
+            );
+
+            // === WIND TEXTURE ===
+            const windTexture = gl.createTexture();
+            const windData = generateWindTexture(WIND_TEX_SIZE);
+
+            gl.bindTexture(gl.TEXTURE_2D, windTexture);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, WIND_TEX_SIZE, WIND_TEX_SIZE, 0, gl.RGBA, gl.UNSIGNED_BYTE, windData);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+            windSampler.set_data(windData);
+
+            // === BLENDING ===
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+            // === STATS ===
+            let frameCount = 0;
+            let lastFpsTime = performance.now();
+
+            // === ANIMATION LOOP ===
+            let lastTime = performance.now();
+
+            function frame() {
+                const now = performance.now();
+                const deltaTime = (now - lastTime) / 1000;
+                lastTime = now;
+
+                // Update view state every frame (like POC 5 WebGPU)
+                // This ensures sync during Leaflet zoom/pan animations
+                updateViewState();
+
+                // Trail width in world units (scale with view)
+                // 3 device pixels / clipPerMeter gives world units
+                const trailWidth = Math.abs(3 / clipPerMeterX / (canvas.width / 2));
+                const opacity = 0.8;
+
+                // Simulation bounds = wind texture bounds
+                const simBounds = {
+                    minX: WIND_BOUNDS.min.x,
+                    minY: WIND_BOUNDS.min.y,
+                    maxX: WIND_BOUNDS.max.x,
+                    maxY: WIND_BOUNDS.max.y
+                };
+
+                // === WASM UPDATE ===
+                simulator.update_with_trails(
+                    windSampler,
+                    trails,
+                    simBounds.minX, simBounds.minY,
+                    simBounds.maxX, simBounds.maxY,
+                    deltaTime,
+                    currentSpeedFactor,
+                    MAX_AGE,
+                    now / 1000,
+                    currentParticleCount
+                );
+
+                // Build vertices (outputs world coords)
+                vertexBuilder.build(
+                    trails,
+                    currentParticleCount,
+                    trailWidth,
+                    opacity,
+                    0.376, 0.647, 0.980  // Light blue
+                );
+
+                const vertexCount = vertexBuilder.get_vertex_count();
+                const ptr = vertexBuilder.get_vertices_ptr();
+                const vertices = new Float32Array(wasm.memory.buffer, ptr, vertexCount * FLOATS_PER_VERTEX);
+
+                // === RENDER ===
+                gl.clearColor(0, 0, 0, 0);  // Transparent background
+                gl.clear(gl.COLOR_BUFFER_BIT);
+
+                // Draw wind background (semi-transparent)
+                gl.useProgram(bgProgram);
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_2D, windTexture);
+                gl.uniform1i(bgLocs.windTex, 0);
+                gl.uniform2f(bgLocs.clipPerMeter, clipPerMeterX, clipPerMeterY);
+                gl.uniform2f(bgLocs.translate, translateX, translateY);
+                gl.uniform2f(bgLocs.texBoundsMin, WIND_BOUNDS.min.x, WIND_BOUNDS.min.y);
+                gl.uniform2f(bgLocs.texBoundsMax, WIND_BOUNDS.max.x, WIND_BOUNDS.max.y);
+                gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+                // Draw trails
+                if (vertexCount > 0) {
+                    gl.bindBuffer(gl.ARRAY_BUFFER, trailBuffer);
+                    gl.bufferSubData(gl.ARRAY_BUFFER, 0, vertices);
+
+                    gl.useProgram(trailProgram);
+                    gl.uniform2f(trailLocs.clipPerMeter, clipPerMeterX, clipPerMeterY);
+                    gl.uniform2f(trailLocs.translate, translateX, translateY);
+
+                    gl.bindVertexArray(trailVao);
+                    gl.drawArrays(gl.TRIANGLES, 0, vertexCount);
+                }
+
+                // FPS counter
+                frameCount++;
+                if (now - lastFpsTime > 1000) {
+                    document.getElementById('fps').textContent = frameCount;
+                    document.getElementById('particleCount').textContent = currentParticleCount;
+                    frameCount = 0;
+                    lastFpsTime = now;
+                }
+
+                requestAnimationFrame(frame);
+            }
+
+            frame();
+        }
+
+        main().catch(err => {
+            console.error(err);
+            document.getElementById('error').textContent = 'Error: ' + err.message;
+            document.getElementById('error').style.display = 'block';
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,1321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>POC 6 - Dynamic Atlas + Tile Loading</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; font-family: system-ui, sans-serif; }
+        #map { height: 100%; }
+
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 60px;
+            z-index: 1000;
+            background: rgba(0, 0, 0, 0.9);
+            color: white;
+            padding: 16px;
+            border-radius: 8px;
+            font-size: 13px;
+            max-width: 350px;
+        }
+        #controls h3 {
+            margin: 0 0 12px 0;
+            font-size: 15px;
+            border-bottom: 1px solid #444;
+            padding-bottom: 8px;
+            color: #60a5fa;
+        }
+        #controls label {
+            display: block;
+            margin: 8px 0 4px;
+            color: #aaa;
+            font-size: 11px;
+        }
+        #controls input[type="text"] {
+            width: 100%;
+            padding: 6px 8px;
+            border: 1px solid #444;
+            border-radius: 4px;
+            background: #222;
+            color: white;
+            font-size: 12px;
+        }
+        #controls button {
+            padding: 6px 12px;
+            margin: 4px 4px 4px 0;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .btn-primary { background: #2563eb; color: white; }
+        .btn-secondary { background: #374151; color: white; }
+        .btn:hover { opacity: 0.9; }
+
+        .control-group {
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #333;
+        }
+
+        #tile-status {
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            margin-top: 8px;
+        }
+        #tile-status.loading { background: #854d0e; color: #fef3c7; }
+        #tile-status.success { background: #166534; color: #bbf7d0; }
+        #tile-status.error { background: #991b1b; color: #fecaca; }
+        #tile-status.synthetic { background: #1e40af; color: #bfdbfe; }
+
+        /* Toggle switch */
+        .toggle-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin: 8px 0;
+        }
+        .toggle-label {
+            color: #ccc;
+            font-size: 12px;
+        }
+        .toggle {
+            position: relative;
+            width: 44px;
+            height: 22px;
+        }
+        .toggle input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-color: #374151;
+            border-radius: 22px;
+            transition: 0.2s;
+        }
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 16px;
+            width: 16px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            border-radius: 50%;
+            transition: 0.2s;
+        }
+        .toggle input:checked + .toggle-slider {
+            background-color: #2563eb;
+        }
+        .toggle input:checked + .toggle-slider:before {
+            transform: translateX(22px);
+        }
+
+        /* Loading spinner */
+        .loading-spinner {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border: 2px solid #fef3c7;
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-right: 6px;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Mobile responsive */
+        @media (max-width: 768px) {
+            #controls {
+                left: 10px;
+                max-width: 280px;
+                font-size: 12px;
+                padding: 12px;
+            }
+            #controls h3 {
+                font-size: 14px;
+                margin-bottom: 8px;
+            }
+            #controls label {
+                font-size: 10px;
+            }
+            #controls button {
+                padding: 8px 12px;
+                font-size: 11px;
+            }
+            #controls input[type="text"] {
+                font-size: 11px;
+                padding: 8px;
+            }
+            #controls input[type="range"] {
+                height: 24px;
+            }
+            #stats {
+                font-size: 10px;
+                padding: 10px;
+                min-width: 160px;
+            }
+            .toggle-label {
+                font-size: 11px;
+            }
+            /* Collapsible sections on mobile */
+            .control-group.collapsible-mobile {
+                display: none;
+            }
+            .control-group.collapsible-mobile.expanded {
+                display: block;
+            }
+        }
+
+        /* Touch-friendly slider track */
+        @media (pointer: coarse) {
+            input[type="range"] {
+                height: 28px;
+            }
+        }
+
+        #stats {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+            background: rgba(0, 0, 0, 0.85);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 12px;
+            min-width: 200px;
+        }
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+        }
+        .stat-label { color: #888; }
+        .stat-value { color: #60a5fa; }
+        .divider {
+            border-top: 1px solid #333;
+            margin: 8px 0;
+        }
+
+        #error {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 2000;
+            background: #7f1d1d;
+            color: #fecaca;
+            padding: 24px;
+            border-radius: 8px;
+            display: none;
+            max-width: 400px;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <div id="controls">
+        <h3>POC 6: Dynamic Atlas</h3>
+
+        <div class="control-group">
+            <label>Tile Server</label>
+            <input type="text" id="tile-server" value="https://your-tile-server.example.com" />
+
+            <label>Layer ID</label>
+            <input type="text" id="layer-id" value="wind:current:output=default:level=0" />
+
+            <div class="toggle-row">
+                <span class="toggle-label">Auto-load on pan/zoom</span>
+                <label class="toggle">
+                    <input type="checkbox" id="auto-load" checked onchange="toggleAutoLoad(this.checked)">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+
+            <div style="margin-top: 8px;">
+                <button class="btn-primary" onclick="loadTiles()">Load Tiles</button>
+                <button class="btn-secondary" onclick="useSynthetic()">Synthetic</button>
+            </div>
+
+            <label>Pattern</label>
+            <select id="pattern-select" onchange="changePattern(this.value)">
+                <option value="uniform">Uniform + Gradient</option>
+                <option value="single">Single Vortex</option>
+                <option value="multi" selected>Multi Vortex</option>
+            </select>
+
+            <div id="tile-status" class="synthetic">Using synthetic data</div>
+        </div>
+
+        <div class="control-group">
+            <label>Zoom Offset: <span id="zoom-offset-val">-2</span></label>
+            <input type="range" id="zoom-offset" min="-4" max="0" value="-2"
+                   oninput="updateZoomOffset(this.value)" />
+            <small style="color:#666">Data zoom = View zoom + offset</small>
+        </div>
+
+        <div class="control-group" style="border-top: 1px solid #333; padding-top: 12px; margin-top: 12px;">
+            <label style="color: #60a5fa; font-weight: 500;">Particle Settings</label>
+
+            <label>Particle Multiplier: <span id="count-val">100</span>%</label>
+            <input type="range" id="particle-count" min="10" max="200" value="100" step="10"
+                   oninput="document.getElementById('count-val').textContent = this.value" />
+
+            <label>Speed Multiplier: <span id="speed-val">1.0</span>x</label>
+            <input type="range" id="speed-factor" min="0.1" max="3.0" value="1.0" step="0.1"
+                   oninput="document.getElementById('speed-val').textContent = this.value" />
+
+            <label>Max Age: <span id="age-val">100</span></label>
+            <input type="range" id="max-age" min="50" max="500" value="100" step="25"
+                   oninput="document.getElementById('age-val').textContent = this.value" />
+
+            <label>Trail Width: <span id="width-val">2.0</span></label>
+            <input type="range" id="trail-width" min="0.5" max="20.0" value="2.0" step="0.5"
+                   oninput="document.getElementById('width-val').textContent = this.value" />
+
+            <label>Trail Length: <span id="length-val">25</span></label>
+            <input type="range" id="trail-length" min="5" max="30" value="25" step="1"
+                   oninput="updateTrailLength(this.value)" />
+        </div>
+    </div>
+
+    <div id="stats">
+        <div class="stat-row">
+            <span class="stat-label">FPS:</span>
+            <span class="stat-value" id="fps">0</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Particles:</span>
+            <span class="stat-value" id="particleCount">0</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Zoom:</span>
+            <span class="stat-value" id="zoomLevel">0</span>
+        </div>
+        <div class="stat-row" id="mobile-indicator" style="display: none;">
+            <span class="stat-label">Mode:</span>
+            <span class="stat-value" style="color: #fbbf24;">Mobile (50%)</span>
+        </div>
+        <div class="divider"></div>
+        <div style="font-size: 10px; color: #888; margin-bottom: 8px;">
+            <div>Zoom Table:</div>
+            <div class="stat-row">
+                <span class="stat-label">Base Particles:</span>
+                <span class="stat-value" id="zoomParticles">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Base Speed:</span>
+                <span class="stat-value" id="zoomSpeed">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">P. Multiplier:</span>
+                <span class="stat-value" id="particleMultiplier">1.00</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">S. Multiplier:</span>
+                <span class="stat-value" id="speedMultiplier">1.00</span>
+            </div>
+        </div>
+        <div class="divider"></div>
+        <div class="stat-row">
+            <span class="stat-label">Data Zoom:</span>
+            <span class="stat-value" id="dataZoom">0</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Atlas Size:</span>
+            <span class="stat-value" id="atlasSize">0x0</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Tiles:</span>
+            <span class="stat-value" id="tileCount">0</span>
+        </div>
+        <div class="divider"></div>
+        <div style="font-size: 10px; color: #888; margin-bottom: 4px;">
+            <div style="cursor: pointer; user-select: none;" onclick="togglePerfSection()">
+                Performance <span id="perf-toggle">+</span>
+            </div>
+        </div>
+        <div id="perf-section" style="display: none; font-size: 10px;">
+            <div class="stat-row">
+                <span class="stat-label">Tile Load (avg):</span>
+                <span class="stat-value" id="perfTileLoad">0ms</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Resample:</span>
+                <span class="stat-value" id="perfResample">0ms</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Wind Update:</span>
+                <span class="stat-value" id="perfWindUpdate">0ms</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Frame Time:</span>
+                <span class="stat-value" id="perfFrameTime">0ms</span>
+            </div>
+        </div>
+        <div class="divider"></div>
+        <div style="font-size: 10px; color: #666;">
+            <div>Bounds: <span id="atlasBounds">-</span></div>
+        </div>
+    </div>
+
+    <div id="error"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script type="module">
+        import init, {
+            ParticleSimulator,
+            WindSampler,
+            TrailManager,
+            TrailVertexBuilder,
+            DynamicAtlas,
+            FixedAtlas,
+            TileCoordinator
+        } from './wasm/meteo_animation_wasm.js';
+
+        import { SyntheticTileGenerator, CHANNEL_RANGES } from './poc-6-synthetic.js';
+
+        // =========================================================================
+        // POC 6: Dynamic Atlas + Real Tile Loading
+        // =========================================================================
+
+        const EARTH_RADIUS = 6378137;
+        const MAX_LAT = 85.051129;
+        let trailLength = 25;
+        const MAX_AGE = 100;
+        const TILE_SIZE = 256;
+        const MAX_PARTICLES = 20000;
+
+        // Synthetic tile generator (JS-based, matches meteo-tiler-v3 encoding)
+        let syntheticGenerator = new SyntheticTileGenerator('multi');
+
+        // Zoom scaling tables
+        const ZOOM_PARTICLES = {
+            3: 13000, 4: 13000, 5: 13000, 6: 13000, 7: 13000,
+            8: 13000, 9: 13000, 10: 13000, 11: 13000, 12: 13000
+        };
+        const ZOOM_SPEED = {
+            3: 40000, 4: 35000, 5: 30000, 6: 25000, 7: 20000,
+            8: 15000, 9: 10000, 10: 7000, 11: 5000, 12: 3000
+        };
+
+        function getZoomScaledValue(zoom, table) {
+            const keys = Object.keys(table).map(Number).sort((a, b) => a - b);
+            if (zoom <= keys[0]) return table[keys[0]];
+            if (zoom >= keys[keys.length - 1]) return table[keys[keys.length - 1]];
+            for (let i = 0; i < keys.length - 1; i++) {
+                if (zoom >= keys[i] && zoom <= keys[i + 1]) {
+                    const t = (zoom - keys[i]) / (keys[i + 1] - keys[i]);
+                    return table[keys[i]] * (1 - t) + table[keys[i + 1]] * t;
+                }
+            }
+            return table[keys[0]];
+        }
+
+        function latLngToMercator(lat, lng) {
+            const x = lng * Math.PI / 180 * EARTH_RADIUS;
+            const latRad = Math.max(-MAX_LAT, Math.min(MAX_LAT, lat)) * Math.PI / 180;
+            const y = Math.log(Math.tan(Math.PI / 4 + latRad / 2)) * EARTH_RADIUS;
+            return { x, y };
+        }
+
+        // === SHADERS ===
+        const BG_VERTEX_SHADER = `#version 300 es
+            out vec2 v_clipPos;
+            void main() {
+                vec2 positions[6] = vec2[](
+                    vec2(-1, -1), vec2(1, -1), vec2(-1, 1),
+                    vec2(-1, 1), vec2(1, -1), vec2(1, 1)
+                );
+                gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);
+                v_clipPos = positions[gl_VertexID];
+            }
+        `;
+
+        const BG_FRAGMENT_SHADER = `#version 300 es
+            precision mediump float;
+            in vec2 v_clipPos;
+            out vec4 fragColor;
+
+            uniform vec2 u_clip_per_meter;
+            uniform vec2 u_translate;
+            uniform vec2 u_atlas_bounds_min;
+            uniform vec2 u_atlas_bounds_max;
+            uniform sampler2D u_wind_tex;
+
+            void main() {
+                // Clip -> World
+                vec2 world = (v_clipPos - u_translate) / u_clip_per_meter;
+
+                // World -> TexCoord (flip Y for texture)
+                vec2 texCoord = (world - u_atlas_bounds_min) / (u_atlas_bounds_max - u_atlas_bounds_min);
+                texCoord.y = 1.0 - texCoord.y;
+
+                // Check out of bounds
+                if (texCoord.x < 0.0 || texCoord.x > 1.0 || texCoord.y < 0.0 || texCoord.y > 1.0) {
+                    fragColor = vec4(0.0);
+                    return;
+                }
+
+                // Sample wind texture
+                vec4 wind = texture(u_wind_tex, texCoord);
+
+                // Check validity (alpha channel)
+                if (wind.a < 0.5) {
+                    // Invalid/land region - dark overlay
+                    fragColor = vec4(0.05, 0.05, 0.1, 0.4);
+                    return;
+                }
+
+                // Decode wind: (sample - 0.5) * 2.0 * 15.0
+                float u = (wind.r - 0.5) * 30.0;
+                float v = (wind.g - 0.5) * 30.0;
+                float speed = sqrt(u * u + v * v);
+
+                // Color by speed (blue to cyan to green to yellow to red)
+                float t = clamp(speed / 15.0, 0.0, 1.0);
+                vec3 color;
+                if (t < 0.25) {
+                    color = mix(vec3(0.0, 0.0, 0.3), vec3(0.0, 0.3, 0.6), t * 4.0);
+                } else if (t < 0.5) {
+                    color = mix(vec3(0.0, 0.3, 0.6), vec3(0.0, 0.6, 0.3), (t - 0.25) * 4.0);
+                } else if (t < 0.75) {
+                    color = mix(vec3(0.0, 0.6, 0.3), vec3(0.8, 0.8, 0.0), (t - 0.5) * 4.0);
+                } else {
+                    color = mix(vec3(0.8, 0.8, 0.0), vec3(1.0, 0.2, 0.0), (t - 0.75) * 4.0);
+                }
+
+                fragColor = vec4(color, 0.3);
+            }
+        `;
+
+        const TRAIL_VERTEX_SHADER = `#version 300 es
+            precision highp float;
+            in vec2 a_position;
+            in float a_alpha;
+            in vec3 a_color;
+            uniform vec2 u_clip_per_meter;
+            uniform vec2 u_translate;
+            out vec4 v_color;
+            void main() {
+                vec2 clip = a_position * u_clip_per_meter + u_translate;
+                gl_Position = vec4(clip, 0.0, 1.0);
+                v_color = vec4(a_color, a_alpha);
+            }
+        `;
+
+        const TRAIL_FRAGMENT_SHADER = `#version 300 es
+            precision mediump float;
+            in vec4 v_color;
+            out vec4 fragColor;
+            void main() {
+                fragColor = v_color;
+            }
+        `;
+
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error('Shader error:', gl.getShaderInfoLog(shader));
+                return null;
+            }
+            return shader;
+        }
+
+        function createProgram(gl, vs, fs) {
+            const program = gl.createProgram();
+            gl.attachShader(program, vs);
+            gl.attachShader(program, fs);
+            gl.linkProgram(program);
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error('Program error:', gl.getProgramInfoLog(program));
+                return null;
+            }
+            return program;
+        }
+
+        // === STATE ===
+        let wasm, atlas, fixedAtlas, coordinator, simulator, trails, vertexBuilder;
+        let windSampler = null;  // For synthetic mode (WindSampler with fixed bounds)
+        let map, canvas, gl;
+        let zoomOffset = -2;
+        let usingSynthetic = true;
+        let lastViewportUpdate = 0;
+        let lastDataZoom = -1;  // Track data zoom for atlas clearing
+        let useFixedAtlas = true;  // Toggle between DynamicAtlas and FixedAtlas
+
+        // Auto-load state
+        let autoLoadTiles = true;
+        let loadingInProgress = false;
+        let pendingLoadRequest = null;
+        const AUTO_LOAD_DEBOUNCE_MS = 300;
+
+        // Performance tracking
+        const perf = {
+            tileLoadTimes: [],       // Rolling array of last N tile load times
+            avgTileLoadTime: 0,
+            lastResampleTime: 0,
+            lastWindUpdateTime: 0,
+            lastFrameTime: 0,
+        };
+        const PERF_SAMPLE_SIZE = 20;  // Keep last N tile load times for averaging
+
+        // Mobile detection
+        const isMobile = window.matchMedia('(max-width: 768px)').matches ||
+                         navigator.maxTouchPoints > 1 ||
+                         /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+        const MOBILE_PARTICLE_SCALE = 0.5;  // Reduce particles on mobile
+
+        // Tile cache: stores raw tile data for resampling when bounds change
+        // Key: "z/x/y", Value: Uint8Array (256x256x4)
+        // LRU-style: oldest entries removed when exceeding MAX_CACHED_TILES
+        const tileCache = new Map();
+        const MAX_CACHED_TILES = 64;  // ~16MB max (256x256x4 bytes per tile)
+
+        // Calculate atlas size based on screen and zoom offset
+        function calculateAtlasSize() {
+            const scale = Math.pow(2, Math.abs(zoomOffset));
+            const screenWidth = window.screen.width * window.devicePixelRatio;
+            const screenHeight = window.screen.height * window.devicePixelRatio;
+            return {
+                width: Math.ceil(screenWidth / scale),
+                height: Math.ceil(screenHeight / scale)
+            };
+        }
+
+        // View state
+        let clipPerMeterX = 0, clipPerMeterY = 0;
+        let translateX = 0, translateY = 0;
+        let isZoomAnimating = false;
+
+        // === MAIN ===
+        async function main() {
+            wasm = await init();
+
+            // Initialize WASM objects
+            atlas = new DynamicAtlas(1.2);  // 20% buffer - used for tile calculation
+            const atlasSize = calculateAtlasSize();
+            fixedAtlas = new FixedAtlas(atlasSize.width, atlasSize.height);
+            console.log(`FixedAtlas created: ${atlasSize.width}x${atlasSize.height} (offset=${zoomOffset})`);
+
+            coordinator = new TileCoordinator(zoomOffset);
+            coordinator.set_zoom_range(2, 8);
+
+            simulator = new ParticleSimulator(MAX_PARTICLES);
+            trails = new TrailManager(MAX_PARTICLES, trailLength);
+            vertexBuilder = new TrailVertexBuilder(MAX_PARTICLES, trailLength);
+
+            // Initialize map
+            map = L.map('map', {
+                zoomSnap: 0,
+                zoomDelta: 0.5,
+                wheelPxPerZoomLevel: 120,
+            }).setView([-5, 120], 5);
+
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                attribution: '&copy; CARTO',
+                maxZoom: 19,
+            }).addTo(map);
+
+            // Create canvas
+            canvas = document.createElement('canvas');
+            canvas.style.position = 'absolute';
+            canvas.style.top = '0';
+            canvas.style.left = '0';
+            canvas.style.zIndex = '450';
+            canvas.style.pointerEvents = 'none';
+            map.getContainer().appendChild(canvas);
+
+            // Zoom animation sync
+            map.on('zoomanim', function(e) {
+                const scale = map.getZoomScale(e.zoom, map.getZoom());
+                if (scale <= 1) {
+                    isZoomAnimating = false;
+                    return;
+                }
+                isZoomAnimating = true;
+                const size = map.getSize();
+                const containerCenterX = size.x / 2;
+                const containerCenterY = size.y / 2;
+                const targetCenterPx = map.latLngToContainerPoint(e.center);
+                const offsetX = targetCenterPx.x - containerCenterX;
+                const offsetY = targetCenterPx.y - containerCenterY;
+                const denom = 1 - 1 / scale;
+                let originX = containerCenterX, originY = containerCenterY;
+                if (Math.abs(denom) > 0.0001) {
+                    originX = containerCenterX + offsetX / denom;
+                    originY = containerCenterY + offsetY / denom;
+                }
+                canvas.style.transformOrigin = `${originX}px ${originY}px`;
+                canvas.style.transform = `scale(${scale})`;
+            });
+
+            map.on('zoomend', () => {
+                isZoomAnimating = false;
+                canvas.style.transform = '';
+                canvas.style.transformOrigin = '';
+            });
+
+            map.on('moveend', () => {
+                if (isZoomAnimating) {
+                    isZoomAnimating = false;
+                    canvas.style.transform = '';
+                    canvas.style.transformOrigin = '';
+                }
+                // Update atlas on move
+                updateAtlas();
+                // Schedule auto-load if enabled
+                scheduleAutoLoad();
+            });
+
+            // Initialize WebGL
+            gl = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: false });
+            if (!gl) {
+                document.getElementById('error').textContent = 'WebGL 2 not supported!';
+                document.getElementById('error').style.display = 'block';
+                return;
+            }
+
+            resizeCanvas();
+            map.on('resize', resizeCanvas);
+
+            // Create background program
+            const bgVs = createShader(gl, gl.VERTEX_SHADER, BG_VERTEX_SHADER);
+            const bgFs = createShader(gl, gl.FRAGMENT_SHADER, BG_FRAGMENT_SHADER);
+            const bgProgram = createProgram(gl, bgVs, bgFs);
+
+            const bgLocs = {
+                clipPerMeter: gl.getUniformLocation(bgProgram, 'u_clip_per_meter'),
+                translate: gl.getUniformLocation(bgProgram, 'u_translate'),
+                atlasBoundsMin: gl.getUniformLocation(bgProgram, 'u_atlas_bounds_min'),
+                atlasBoundsMax: gl.getUniformLocation(bgProgram, 'u_atlas_bounds_max'),
+                windTex: gl.getUniformLocation(bgProgram, 'u_wind_tex'),
+            };
+
+            // Create wind texture for background visualization
+            const windTexture = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, windTexture);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+            // Will be updated when wind data changes
+            let lastWindTexWidth = 0, lastWindTexHeight = 0;
+
+            // Create trail shader program
+            const vs = createShader(gl, gl.VERTEX_SHADER, TRAIL_VERTEX_SHADER);
+            const fs = createShader(gl, gl.FRAGMENT_SHADER, TRAIL_FRAGMENT_SHADER);
+            const program = createProgram(gl, vs, fs);
+
+            const locs = {
+                position: gl.getAttribLocation(program, 'a_position'),
+                alpha: gl.getAttribLocation(program, 'a_alpha'),
+                color: gl.getAttribLocation(program, 'a_color'),
+                clipPerMeter: gl.getUniformLocation(program, 'u_clip_per_meter'),
+                translate: gl.getUniformLocation(program, 'u_translate'),
+            };
+
+            // Create VAO
+            const vao = gl.createVertexArray();
+            gl.bindVertexArray(vao);
+
+            const buffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+
+            const FLOATS_PER_VERTEX = 6;
+            const STRIDE = FLOATS_PER_VERTEX * 4;
+            const MAX_TRAIL_LENGTH = 30; // Max slider value
+            const maxVertices = MAX_PARTICLES * (MAX_TRAIL_LENGTH - 1) * 6;
+            gl.bufferData(gl.ARRAY_BUFFER, maxVertices * STRIDE, gl.DYNAMIC_DRAW);
+
+            gl.enableVertexAttribArray(locs.position);
+            gl.vertexAttribPointer(locs.position, 2, gl.FLOAT, false, STRIDE, 0);
+            gl.enableVertexAttribArray(locs.alpha);
+            gl.vertexAttribPointer(locs.alpha, 1, gl.FLOAT, false, STRIDE, 8);
+            gl.enableVertexAttribArray(locs.color);
+            gl.vertexAttribPointer(locs.color, 3, gl.FLOAT, false, STRIDE, 12);
+
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+            // Initialize with synthetic mode (fixed bounds like POC 5)
+            useSynthetic();
+
+            // Show mobile indicator if on mobile
+            if (isMobile) {
+                document.getElementById('mobile-indicator').style.display = 'flex';
+                console.log('Mobile mode detected - particles reduced to 50%');
+            }
+
+            // Animation loop
+            let lastTime = performance.now();
+            let frameCount = 0, lastFpsTime = lastTime;
+
+            function frame() {
+                const frameStart = performance.now();
+                const dt = (frameStart - lastTime) / 1000;
+                lastTime = frameStart;
+
+                frameCount++;
+                if (frameStart - lastFpsTime > 1000) {
+                    document.getElementById('fps').textContent = frameCount;
+                    frameCount = 0;
+                    lastFpsTime = frameStart;
+                    // Update perf UI once per second
+                    updatePerfUI();
+                }
+
+                if (!isZoomAnimating) {
+                    updateViewState();
+                }
+
+                const zoom = map.getZoom();
+
+                // Get slider values
+                const particleMultiplier = parseFloat(document.getElementById('particle-count').value) / 100; // 0-200 → 0.0-2.0
+                const speedMultiplier = parseFloat(document.getElementById('speed-factor').value);
+                const maxAge = parseInt(document.getElementById('max-age').value);
+                const trailWidth = parseFloat(document.getElementById('trail-width').value);
+
+                // Apply zoom scaling with slider as multiplier
+                const zoomParticles = getZoomScaledValue(zoom, ZOOM_PARTICLES);
+                const zoomSpeed = getZoomScaledValue(zoom, ZOOM_SPEED);
+
+                // Apply mobile scaling
+                const mobileScale = isMobile ? MOBILE_PARTICLE_SCALE : 1.0;
+                const particleCount = Math.round(zoomParticles * particleMultiplier * mobileScale);
+                const speedFactor = zoomSpeed * speedMultiplier;
+
+                // Debug display
+                document.getElementById('zoomLevel').textContent = zoom.toFixed(2);
+                document.getElementById('particleCount').textContent = particleCount;
+                document.getElementById('zoomParticles').textContent = Math.round(zoomParticles);
+                document.getElementById('zoomSpeed').textContent = Math.round(zoomSpeed);
+                document.getElementById('particleMultiplier').textContent = particleMultiplier.toFixed(2);
+                document.getElementById('speedMultiplier').textContent = speedMultiplier.toFixed(2);
+
+                // Bounds for simulation and background
+                let boundsMinX, boundsMinY, boundsMaxX, boundsMaxY;
+
+                // UNIFIED SIMULATION PATH
+                // Both synthetic and real tiles use WindSampler + update_with_trails()
+                if (windSampler) {
+                    boundsMinX = windSampler.get_min_x();
+                    boundsMinY = windSampler.get_min_y();
+                    boundsMaxX = windSampler.get_max_x();
+                    boundsMaxY = windSampler.get_max_y();
+
+                    // Single WASM call - no JS loop, no boundary crossing overhead
+                    simulator.update_with_trails(
+                        windSampler,
+                        trails,
+                        boundsMinX, boundsMinY,
+                        boundsMaxX, boundsMaxY,
+                        dt,
+                        speedFactor,
+                        maxAge,
+                        frameStart / 1000,
+                        particleCount
+                    );
+                } else {
+                    // Fallback: no wind data yet
+                    boundsMinX = 0; boundsMinY = 0;
+                    boundsMaxX = 1; boundsMaxY = 1;
+                }
+
+                // Build vertices
+                const scaledTrailWidth = Math.abs(trailWidth / clipPerMeterX / (canvas.width / 2));
+                vertexBuilder.build(trails, particleCount, scaledTrailWidth, 0.8, 0.376, 0.647, 0.980);
+
+                const vertexCount = vertexBuilder.get_vertex_count();
+                const ptr = vertexBuilder.get_vertices_ptr();
+                const vertices = new Float32Array(wasm.memory.buffer, ptr, vertexCount * FLOATS_PER_VERTEX);
+
+                // Render
+                gl.clearColor(0, 0, 0, 0);
+                gl.clear(gl.COLOR_BUFFER_BIT);
+
+                // Update wind texture from fixedAtlas
+                if (fixedAtlas && fixedAtlas.get_width() > 0) {
+                    const texWidth = fixedAtlas.get_width();
+                    const texHeight = fixedAtlas.get_height();
+                    const dataPtr = fixedAtlas.get_data_ptr();
+                    const dataLen = fixedAtlas.get_data_len();
+
+                    if (dataLen > 0) {
+                        const texData = new Uint8Array(wasm.memory.buffer, dataPtr, dataLen);
+                        gl.bindTexture(gl.TEXTURE_2D, windTexture);
+
+                        if (texWidth !== lastWindTexWidth || texHeight !== lastWindTexHeight) {
+                            // Reallocate texture (only on atlas size change)
+                            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, texWidth, texHeight, 0, gl.RGBA, gl.UNSIGNED_BYTE, texData);
+                            lastWindTexWidth = texWidth;
+                            lastWindTexHeight = texHeight;
+                        } else {
+                            // Update existing (every frame - fixedAtlas data may have changed)
+                            gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, texWidth, texHeight, gl.RGBA, gl.UNSIGNED_BYTE, texData);
+                        }
+                    }
+                }
+
+                // Draw background with wind visualization
+                gl.useProgram(bgProgram);
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_2D, windTexture);
+                gl.uniform1i(bgLocs.windTex, 0);
+                gl.uniform2f(bgLocs.clipPerMeter, clipPerMeterX, clipPerMeterY);
+                gl.uniform2f(bgLocs.translate, translateX, translateY);
+                gl.uniform2f(bgLocs.atlasBoundsMin, boundsMinX, boundsMinY);
+                gl.uniform2f(bgLocs.atlasBoundsMax, boundsMaxX, boundsMaxY);
+                gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+                // Draw trails
+                if (vertexCount > 0) {
+                    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+                    gl.bufferSubData(gl.ARRAY_BUFFER, 0, vertices);
+
+                    gl.useProgram(program);
+                    gl.uniform2f(locs.clipPerMeter, clipPerMeterX, clipPerMeterY);
+                    gl.uniform2f(locs.translate, translateX, translateY);
+
+                    gl.bindVertexArray(vao);
+                    gl.drawArrays(gl.TRIANGLES, 0, vertexCount);
+                }
+
+                // Track frame time
+                perf.lastFrameTime = performance.now() - frameStart;
+
+                requestAnimationFrame(frame);
+            }
+
+            requestAnimationFrame(frame);
+        }
+
+        function resizeCanvas() {
+            const size = map.getSize();
+            canvas.width = size.x * window.devicePixelRatio;
+            canvas.height = size.y * window.devicePixelRatio;
+            canvas.style.width = size.x + 'px';
+            canvas.style.height = size.y + 'px';
+            gl.viewport(0, 0, canvas.width, canvas.height);
+        }
+
+        function updateViewState() {
+            if (isZoomAnimating) return;
+
+            const center = map.getCenter();
+            const size = map.getSize();
+            const centerMerc = latLngToMercator(center.lat, center.lng);
+            const centerPx = map.latLngToContainerPoint(center);
+
+            const offsetLngLat = L.latLng(center.lat, center.lng + 1);
+            const offsetMerc = latLngToMercator(center.lat, center.lng + 1);
+            const offsetPx = map.latLngToContainerPoint(offsetLngLat);
+            const pxPerMeterX = (offsetPx.x - centerPx.x) / (offsetMerc.x - centerMerc.x);
+
+            const offsetLatLngY = L.latLng(center.lat + 1, center.lng);
+            const offsetMercY = latLngToMercator(center.lat + 1, center.lng);
+            const offsetPxY = map.latLngToContainerPoint(offsetLatLngY);
+            const pxPerMeterY = (offsetPxY.y - centerPx.y) / (offsetMercY.y - centerMerc.y);
+
+            const dpr = window.devicePixelRatio;
+            clipPerMeterX = pxPerMeterX * dpr * 2 / (size.x * dpr);
+            clipPerMeterY = -pxPerMeterY * dpr * 2 / (size.y * dpr);
+
+            const centerClipX = (centerPx.x / size.x) * 2 - 1;
+            const centerClipY = 1 - (centerPx.y / size.y) * 2;
+            translateX = centerClipX - centerMerc.x * clipPerMeterX;
+            translateY = centerClipY - centerMerc.y * clipPerMeterY;
+        }
+
+        function updateAtlas() {
+            const bounds = map.getBounds();
+            const sw = latLngToMercator(bounds.getSouth(), bounds.getWest());
+            const ne = latLngToMercator(bounds.getNorth(), bounds.getEast());
+
+            const viewZoom = Math.floor(map.getZoom());
+            const dataZoom = coordinator.get_data_zoom(viewZoom);
+
+            // Use DynamicAtlas to calculate needed tiles
+            const tileCoords = atlas.update_viewport(sw.x, sw.y, ne.x, ne.y, dataZoom);
+
+            // Update FixedAtlas bounds (no resize, no data clear!)
+            fixedAtlas.update_bounds(sw.x, sw.y, ne.x, ne.y, dataZoom);
+
+            // Clear fixedAtlas and tile cache when data zoom changes
+            if (dataZoom !== lastDataZoom) {
+                console.log(`Data zoom changed: ${lastDataZoom} -> ${dataZoom}, clearing atlas and cache`);
+                fixedAtlas.clear();
+                coordinator.clear();  // Force reload all tiles
+                tileCache.clear();    // Clear raw tile cache
+                lastDataZoom = dataZoom;
+            }
+
+            // Fill with synthetic data if in synthetic mode
+            if (usingSynthetic && tileCoords.length > 0) {
+                fillAtlasWithSynthetic(tileCoords);
+                // Update WindSampler with new bounds and data
+                if (windSampler) {
+                    updateWindSamplerFromFixedAtlas();
+                }
+            } else if (!usingSynthetic && tileCache.size > 0) {
+                // Real tiles mode: clear atlas first to avoid "hallucination"
+                // (old data mixing with new data in uncovered areas)
+                fixedAtlas.clear();
+                // Resample cached tiles to new bounds
+                resampleCachedTiles();
+                if (windSampler) {
+                    updateWindSamplerFromFixedAtlas();
+                }
+            }
+
+            // Update stats
+            document.getElementById('dataZoom').textContent = dataZoom;
+            document.getElementById('atlasSize').textContent = `${fixedAtlas.get_width()}x${fixedAtlas.get_height()}`;
+            document.getElementById('tileCount').textContent = tileCoords.length / 3;
+
+            const minX = fixedAtlas.get_bounds_min_x();
+            const minY = fixedAtlas.get_bounds_min_y();
+            const maxX = fixedAtlas.get_bounds_max_x();
+            const maxY = fixedAtlas.get_bounds_max_y();
+            document.getElementById('atlasBounds').textContent =
+                `${(minX/1e6).toFixed(1)}M - ${(maxX/1e6).toFixed(1)}M`;
+
+            return tileCoords;
+        }
+
+        // Fill atlas with synthetic tiles (georeferenced, matches meteo-tiler-v3)
+        function fillAtlasWithSynthetic(tileCoords) {
+            for (let i = 0; i < tileCoords.length; i += 3) {
+                const z = tileCoords[i];
+                const x = tileCoords[i + 1];
+                const y = tileCoords[i + 2];
+                // Generate proper georeferenced tile
+                const tileData = syntheticGenerator.generateTile(z, x, y);
+                // Use FixedAtlas with bilinear resampling
+                fixedAtlas.set_tile_resampled(z, x, y, tileData);
+            }
+        }
+
+        // Resample all cached tiles to current fixedAtlas bounds
+        function resampleCachedTiles() {
+            const resampleStart = performance.now();
+            const dataZoom = fixedAtlas.get_tile_zoom();
+            let count = 0;
+            for (const [key, tileData] of tileCache) {
+                const [z, x, y] = key.split('/').map(Number);
+                if (z === dataZoom) {
+                    fixedAtlas.set_tile_resampled(z, x, y, tileData);
+                    count++;
+                }
+            }
+            perf.lastResampleTime = performance.now() - resampleStart;
+            console.log(`Resampled ${count} cached tiles to new bounds in ${perf.lastResampleTime.toFixed(1)}ms`);
+        }
+
+        // Debounced auto-load function
+        function scheduleAutoLoad() {
+            // Skip if disabled, using synthetic, or already loading
+            if (!autoLoadTiles || usingSynthetic || loadingInProgress) return;
+
+            // Cancel previous pending request
+            if (pendingLoadRequest) {
+                clearTimeout(pendingLoadRequest);
+            }
+
+            // Debounce - wait for user to stop panning
+            pendingLoadRequest = setTimeout(async () => {
+                pendingLoadRequest = null;
+                await loadTiles();
+            }, AUTO_LOAD_DEBOUNCE_MS);
+        }
+
+        window.toggleAutoLoad = function(enabled) {
+            autoLoadTiles = enabled;
+            console.log(`Auto-load tiles: ${enabled ? 'enabled' : 'disabled'}`);
+
+            // If enabling and not synthetic, trigger immediate load
+            if (enabled && !usingSynthetic) {
+                scheduleAutoLoad();
+            }
+        };
+
+        window.togglePerfSection = function() {
+            const section = document.getElementById('perf-section');
+            const toggle = document.getElementById('perf-toggle');
+            if (section.style.display === 'none') {
+                section.style.display = 'block';
+                toggle.textContent = '-';
+            } else {
+                section.style.display = 'none';
+                toggle.textContent = '+';
+            }
+        };
+
+        function updatePerfUI() {
+            document.getElementById('perfTileLoad').textContent =
+                perf.avgTileLoadTime > 0 ? `${perf.avgTileLoadTime.toFixed(1)}ms` : '-';
+            document.getElementById('perfResample').textContent =
+                perf.lastResampleTime > 0 ? `${perf.lastResampleTime.toFixed(1)}ms` : '-';
+            document.getElementById('perfWindUpdate').textContent =
+                perf.lastWindUpdateTime > 0 ? `${perf.lastWindUpdateTime.toFixed(2)}ms` : '-';
+            document.getElementById('perfFrameTime').textContent =
+                `${perf.lastFrameTime.toFixed(1)}ms`;
+        }
+
+        window.useSynthetic = function() {
+            usingSynthetic = true;
+            const pattern = document.getElementById('pattern-select').value;
+            document.getElementById('tile-status').className = 'synthetic';
+            document.getElementById('tile-status').textContent = `Synthetic: ${pattern}`;
+
+            // Update atlas with synthetic tiles
+            updateAtlas();
+
+            // Free old WindSampler before creating new one
+            if (windSampler) {
+                windSampler.free();
+            }
+            // Create WindSampler from fixedAtlas
+            windSampler = createWindSamplerFromFixedAtlas();
+
+            console.log(`Synthetic mode: pattern=${pattern}, fixedAtlas=${fixedAtlas.get_width()}x${fixedAtlas.get_height()}`);
+        };
+
+        // Helper to create WindSampler from FixedAtlas
+        function createWindSamplerFromFixedAtlas() {
+            const width = fixedAtlas.get_width();
+            const height = fixedAtlas.get_height();
+            const minX = fixedAtlas.get_bounds_min_x();
+            const minY = fixedAtlas.get_bounds_min_y();
+            const maxX = fixedAtlas.get_bounds_max_x();
+            const maxY = fixedAtlas.get_bounds_max_y();
+
+            // Use get_data_copy() - returns a safe copy, avoids detached ArrayBuffer
+            const data = fixedAtlas.get_data_copy();
+
+            const sampler = new WindSampler(width, height);
+            sampler.set_bounds(minX, minY, maxX, maxY);
+            sampler.set_data(data);
+            return sampler;
+        }
+
+        function updateWindSamplerFromFixedAtlas() {
+            if (windSampler) {
+                const windStart = performance.now();
+                windSampler.set_bounds(
+                    fixedAtlas.get_bounds_min_x(),
+                    fixedAtlas.get_bounds_min_y(),
+                    fixedAtlas.get_bounds_max_x(),
+                    fixedAtlas.get_bounds_max_y()
+                );
+                // Use get_data_copy() - returns a safe copy
+                const data = fixedAtlas.get_data_copy();
+                windSampler.set_data(data);
+                perf.lastWindUpdateTime = performance.now() - windStart;
+            }
+        }
+
+        window.changePattern = function(pattern) {
+            syntheticGenerator.setPattern(pattern);
+            if (usingSynthetic) {
+                // Regenerate tiles with new pattern
+                useSynthetic();
+            }
+        };
+
+        window.updateTrailLength = function(value) {
+            trailLength = parseInt(value);
+            document.getElementById('length-val').textContent = value;
+
+            // Free old WASM objects before recreating
+            if (trails) trails.free();
+            if (vertexBuilder) vertexBuilder.free();
+
+            // Recreate trail managers with new length
+            trails = new TrailManager(MAX_PARTICLES, trailLength);
+            vertexBuilder = new TrailVertexBuilder(MAX_PARTICLES, trailLength);
+            console.log(`Trail length updated to ${trailLength}`);
+        };
+
+        window.loadTiles = async function() {
+            // Prevent concurrent loads
+            if (loadingInProgress) {
+                console.log('Load already in progress, skipping');
+                return;
+            }
+            loadingInProgress = true;
+
+            const status = document.getElementById('tile-status');
+            status.className = 'loading';
+            status.innerHTML = '<span class="loading-spinner"></span>Loading tiles...';
+
+            const server = document.getElementById('tile-server').value;
+            const layerId = document.getElementById('layer-id').value;
+
+            const tileCoords = updateAtlas();
+            const unloaded = coordinator.filter_unloaded(tileCoords);
+
+            if (unloaded.length === 0) {
+                status.className = 'success';
+                status.textContent = 'All tiles cached, resampling...';
+
+                // Resample cached tiles to current bounds
+                resampleCachedTiles();
+
+                // Create/update WindSampler from fixedAtlas
+                if (!windSampler || usingSynthetic) {
+                    windSampler = createWindSamplerFromFixedAtlas();
+                } else {
+                    updateWindSamplerFromFixedAtlas();
+                }
+                usingSynthetic = false;
+                status.textContent = `Resampled ${tileCache.size} tiles`;
+                loadingInProgress = false;
+                return;
+            }
+
+            let loaded = 0, failed = 0;
+            const totalTiles = unloaded.length / 3;
+
+            // Build array of tile load promises (parallel fetch)
+            const tilePromises = [];
+            for (let i = 0; i < unloaded.length; i += 3) {
+                const z = unloaded[i], x = unloaded[i+1], y = unloaded[i+2];
+                const url = `${server}/api/tilerv3/tiles/${layerId}/${z}/${x}/${y}`;
+
+                const promise = (async () => {
+                    const tileStart = performance.now();
+                    try {
+                        const response = await fetch(url, { mode: 'cors' });
+                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                        const blob = await response.blob();
+                        const bitmap = await createImageBitmap(blob);
+                        const offscreen = new OffscreenCanvas(bitmap.width, bitmap.height);
+                        const ctx = offscreen.getContext('2d');
+                        ctx.drawImage(bitmap, 0, 0);
+                        const imageData = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+
+                        // Free GPU resources
+                        bitmap.close();
+
+                        // Store raw tile data in cache for later resampling
+                        const tileData = new Uint8Array(imageData.data);
+
+                        // LRU eviction: remove oldest if cache is full
+                        if (tileCache.size >= MAX_CACHED_TILES) {
+                            const oldestKey = tileCache.keys().next().value;
+                            tileCache.delete(oldestKey);
+                            // Also remove from coordinator so it can be re-requested
+                            const [ez, ex, ey] = oldestKey.split('/').map(Number);
+                            coordinator.clear_tile(ez, ex, ey);
+                            console.log(`Cache full, evicted tile ${oldestKey}`);
+                        }
+                        tileCache.set(`${z}/${x}/${y}`, tileData);
+
+                        // Use FixedAtlas with bilinear resampling
+                        fixedAtlas.set_tile_resampled(z, x, y, tileData);
+                        coordinator.mark_loaded(z, x, y);
+
+                        // Track tile load time
+                        const tileTime = performance.now() - tileStart;
+                        perf.tileLoadTimes.push(tileTime);
+                        if (perf.tileLoadTimes.length > PERF_SAMPLE_SIZE) {
+                            perf.tileLoadTimes.shift();
+                        }
+                        perf.avgTileLoadTime = perf.tileLoadTimes.reduce((a, b) => a + b, 0) / perf.tileLoadTimes.length;
+
+                        loaded++;
+                        status.innerHTML = `<span class="loading-spinner"></span>${loaded + failed}/${totalTiles}`;
+                        return { success: true, z, x, y };
+                    } catch (err) {
+                        console.warn(`Failed to load tile ${z}/${x}/${y}:`, err);
+                        failed++;
+                        status.innerHTML = `<span class="loading-spinner"></span>${loaded + failed}/${totalTiles}`;
+                        return { success: false, z, x, y, error: err };
+                    }
+                })();
+
+                tilePromises.push(promise);
+            }
+
+            // Wait for all tiles to load in parallel
+            await Promise.all(tilePromises);
+
+            // Create WindSampler from fixedAtlas
+            if (!windSampler || usingSynthetic) {
+                // Free old WindSampler before creating new one
+                if (windSampler) {
+                    windSampler.free();
+                }
+                windSampler = createWindSamplerFromFixedAtlas();
+                console.log('Created WindSampler from fixedAtlas:',
+                    fixedAtlas.get_width() + 'x' + fixedAtlas.get_height(),
+                    'bounds:', fixedAtlas.get_bounds_min_x().toExponential(2), 'to', fixedAtlas.get_bounds_max_x().toExponential(2));
+            } else {
+                updateWindSamplerFromFixedAtlas();
+            }
+
+            usingSynthetic = false;
+            loadingInProgress = false;
+
+            if (failed === 0) {
+                status.className = 'success';
+                status.textContent = `Loaded ${loaded} tiles`;
+            } else {
+                status.className = 'error';
+                status.textContent = `Loaded ${loaded}, failed ${failed}`;
+            }
+        };
+
+        window.updateZoomOffset = function(value) {
+            zoomOffset = parseInt(value);
+            document.getElementById('zoom-offset-val').textContent = value;
+
+            // Free old WASM objects before recreating
+            if (fixedAtlas) fixedAtlas.free();
+            if (coordinator) coordinator.free();
+
+            // Recreate fixedAtlas with new size based on offset
+            const atlasSize = calculateAtlasSize();
+            fixedAtlas = new FixedAtlas(atlasSize.width, atlasSize.height);
+            console.log(`FixedAtlas recreated: ${atlasSize.width}x${atlasSize.height} (offset=${zoomOffset})`);
+
+            // Reset data zoom tracking
+            lastDataZoom = -1;
+
+            coordinator = new TileCoordinator(zoomOffset);
+            coordinator.set_zoom_range(2, 8);
+
+            if (usingSynthetic) {
+                useSynthetic();
+            }
+        };
+
+        main().catch(err => {
+            console.error(err);
+            document.getElementById('error').textContent = 'Error: ' + err.message;
+            document.getElementById('error').style.display = 'block';
+        });
+    </script>
+</body>
+</html>
