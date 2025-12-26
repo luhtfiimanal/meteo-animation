@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>POC 1 - WebGL + WASM Particle Boundary</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            background: #1a1a2e;
+            color: white;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            overflow: hidden;
+        }
+        .container {
+            display: flex;
+            height: 100vh;
+        }
+        .controls {
+            width: 300px;
+            padding: 20px;
+            background: #16213e;
+            overflow-y: auto;
+        }
+        .canvas-container {
+            flex: 1;
+            position: relative;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        h1 {
+            font-size: 1.2em;
+            margin-bottom: 20px;
+            color: #4ade80;
+        }
+        .control-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 0.9em;
+            color: #a0aec0;
+        }
+        input[type="range"] {
+            width: 100%;
+            margin-bottom: 5px;
+        }
+        .value {
+            font-size: 0.85em;
+            color: #4ade80;
+        }
+        .stats {
+            background: #0f3460;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 0.9em;
+        }
+        .stat-label {
+            color: #a0aec0;
+        }
+        .stat-value {
+            color: #4ade80;
+            font-family: monospace;
+        }
+        .legend {
+            margin-top: 20px;
+            padding: 15px;
+            background: #0f3460;
+            border-radius: 8px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+            font-size: 0.85em;
+        }
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 10px;
+        }
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 1.5em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="controls">
+            <h1>POC 1: WebGL + WASM</h1>
+            <p style="font-size: 0.85em; color: #a0aec0; margin-bottom: 20px;">
+                Particle simulation in Rust/WASM,<br>
+                rendered with WebGL 2
+            </p>
+
+            <div class="control-group">
+                <label>Particle Count: <span id="countValue">1000</span></label>
+                <input type="range" id="particleCount" min="100" max="10000" value="1000" step="100">
+            </div>
+
+            <div class="control-group">
+                <label>Wind Speed X: <span id="windXValue">2.0</span></label>
+                <input type="range" id="windX" min="-10" max="10" value="2" step="0.5">
+            </div>
+
+            <div class="control-group">
+                <label>Wind Speed Y: <span id="windYValue">1.0</span></label>
+                <input type="range" id="windY" min="-10" max="10" value="1" step="0.5">
+            </div>
+
+            <div class="control-group">
+                <label>Max Age: <span id="maxAgeValue">100</span></label>
+                <input type="range" id="maxAge" min="20" max="200" value="100" step="10">
+            </div>
+
+            <div class="control-group">
+                <label>Point Size: <span id="pointSizeValue">6</span></label>
+                <input type="range" id="pointSize" min="2" max="20" value="6" step="1">
+            </div>
+
+            <div class="stats">
+                <div class="stat-row">
+                    <span class="stat-label">FPS:</span>
+                    <span class="stat-value" id="fps">0</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Active Particles:</span>
+                    <span class="stat-value" id="activeParticles">0</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">WASM Update:</span>
+                    <span class="stat-value" id="wasmTime">0 ms</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">WebGL Render:</span>
+                    <span class="stat-value" id="renderTime">0 ms</span>
+                </div>
+            </div>
+
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #4ade80;"></div>
+                    <span>Active (state = 0)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #f87171;"></div>
+                    <span>Exiting (state = 1)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #fbbf24;"></div>
+                    <span>Respawning (state = 2)</span>
+                </div>
+            </div>
+        </div>
+        <div class="canvas-container">
+            <canvas id="canvas"></canvas>
+            <div class="loading" id="loading">Loading WASM...</div>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, { ParticleSimulator } from '../crates/meteo-animation-wasm/pkg/meteo_animation_wasm.js';
+
+        // WebGL Shaders
+        const VERTEX_SHADER = `#version 300 es
+            precision highp float;
+
+            in vec2 a_position;
+            in float a_age;
+            in float a_state;
+
+            uniform vec2 u_bounds_min;
+            uniform vec2 u_bounds_max;
+            uniform float u_point_size;
+            uniform float u_max_age;
+
+            out vec4 v_color;
+
+            void main() {
+                // Skip inactive particles (state == 3)
+                if (a_state == 3.0) {
+                    gl_Position = vec4(2.0, 2.0, 0.0, 1.0);
+                    gl_PointSize = 0.0;
+                    return;
+                }
+
+                // Transform to clip space [-1, 1]
+                vec2 normalized = (a_position - u_bounds_min) / (u_bounds_max - u_bounds_min);
+                vec2 clip = normalized * 2.0 - 1.0;
+                gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+                gl_PointSize = u_point_size;
+
+                // Color by state
+                float age_fade = 1.0 - (a_age / u_max_age) * 0.5;
+                if (a_state == 2.0) {
+                    v_color = vec4(0.984, 0.749, 0.145, age_fade); // yellow - respawning
+                } else if (a_state == 1.0) {
+                    v_color = vec4(0.973, 0.443, 0.443, age_fade); // red - exiting
+                } else {
+                    v_color = vec4(0.290, 0.871, 0.502, age_fade); // green - active
+                }
+            }
+        `;
+
+        const FRAGMENT_SHADER = `#version 300 es
+            precision mediump float;
+
+            in vec4 v_color;
+            out vec4 fragColor;
+
+            void main() {
+                vec2 coord = gl_PointCoord * 2.0 - 1.0;
+                float dist = length(coord);
+                if (dist > 1.0) discard;
+
+                float alpha = v_color.a * (1.0 - dist * 0.5);
+                fragColor = vec4(v_color.rgb, alpha);
+            }
+        `;
+
+        // Create shader
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error('Shader compile error:', gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+        // Create program
+        function createProgram(gl, vs, fs) {
+            const program = gl.createProgram();
+            gl.attachShader(program, vs);
+            gl.attachShader(program, fs);
+            gl.linkProgram(program);
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error('Program link error:', gl.getProgramInfoLog(program));
+                gl.deleteProgram(program);
+                return null;
+            }
+            return program;
+        }
+
+        async function main() {
+            // Initialize WASM
+            const wasm = await init();
+            document.getElementById('loading').style.display = 'none';
+
+            // Setup canvas
+            const canvas = document.getElementById('canvas');
+            const gl = canvas.getContext('webgl2');
+            if (!gl) {
+                alert('WebGL 2 not supported!');
+                return;
+            }
+
+            // Resize canvas
+            function resize() {
+                canvas.width = canvas.clientWidth * window.devicePixelRatio;
+                canvas.height = canvas.clientHeight * window.devicePixelRatio;
+                gl.viewport(0, 0, canvas.width, canvas.height);
+            }
+            resize();
+            window.addEventListener('resize', resize);
+
+            // Create shaders
+            const vs = createShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
+            const fs = createShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
+            const program = createProgram(gl, vs, fs);
+
+            // Get locations
+            const posLoc = gl.getAttribLocation(program, 'a_position');
+            const ageLoc = gl.getAttribLocation(program, 'a_age');
+            const stateLoc = gl.getAttribLocation(program, 'a_state');
+            const boundsMinLoc = gl.getUniformLocation(program, 'u_bounds_min');
+            const boundsMaxLoc = gl.getUniformLocation(program, 'u_bounds_max');
+            const pointSizeLoc = gl.getUniformLocation(program, 'u_point_size');
+            const maxAgeLoc = gl.getUniformLocation(program, 'u_max_age');
+
+            // Create VAO
+            const vao = gl.createVertexArray();
+            gl.bindVertexArray(vao);
+
+            // Create buffer
+            const buffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+
+            // Setup attributes (interleaved: [x, y, age, state] per particle)
+            const STRIDE = 4 * 4; // 4 floats * 4 bytes
+            gl.enableVertexAttribArray(posLoc);
+            gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, STRIDE, 0);
+            gl.enableVertexAttribArray(ageLoc);
+            gl.vertexAttribPointer(ageLoc, 1, gl.FLOAT, false, STRIDE, 8);
+            gl.enableVertexAttribArray(stateLoc);
+            gl.vertexAttribPointer(stateLoc, 1, gl.FLOAT, false, STRIDE, 12);
+
+            // Create particle simulator
+            const MAX_PARTICLES = 10000;
+            const simulator = new ParticleSimulator(MAX_PARTICLES);
+
+            // Pre-allocate buffer
+            gl.bufferData(gl.ARRAY_BUFFER, MAX_PARTICLES * STRIDE, gl.DYNAMIC_DRAW);
+
+            // Enable blending
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+            // Controls
+            const particleCountSlider = document.getElementById('particleCount');
+            const windXSlider = document.getElementById('windX');
+            const windYSlider = document.getElementById('windY');
+            const maxAgeSlider = document.getElementById('maxAge');
+            const pointSizeSlider = document.getElementById('pointSize');
+
+            // Update value displays
+            particleCountSlider.oninput = () => document.getElementById('countValue').textContent = particleCountSlider.value;
+            windXSlider.oninput = () => document.getElementById('windXValue').textContent = windXSlider.value;
+            windYSlider.oninput = () => document.getElementById('windYValue').textContent = windYSlider.value;
+            maxAgeSlider.oninput = () => document.getElementById('maxAgeValue').textContent = maxAgeSlider.value;
+            pointSizeSlider.oninput = () => document.getElementById('pointSizeValue').textContent = pointSizeSlider.value;
+
+            // Stats
+            let frameCount = 0;
+            let lastFpsTime = performance.now();
+            let wasmTimeAvg = 0;
+            let renderTimeAvg = 0;
+
+            // Animation loop
+            let lastTime = performance.now();
+            function frame() {
+                const now = performance.now();
+                const deltaTime = (now - lastTime) / 1000;
+                lastTime = now;
+
+                // Get control values
+                const targetCount = parseInt(particleCountSlider.value);
+                const windX = parseFloat(windXSlider.value);
+                const windY = parseFloat(windYSlider.value);
+                const maxAge = parseFloat(maxAgeSlider.value);
+                const pointSize = parseFloat(pointSizeSlider.value);
+
+                // Bounds (canvas pixels)
+                const boundsMinX = 0;
+                const boundsMinY = 0;
+                const boundsMaxX = canvas.width;
+                const boundsMaxY = canvas.height;
+
+                // Update WASM simulation
+                const wasmStart = performance.now();
+                simulator.update(
+                    boundsMinX, boundsMinY,
+                    boundsMaxX, boundsMaxY,
+                    windX * 50, windY * 50,  // Scale wind
+                    deltaTime,
+                    maxAge,
+                    now / 1000,  // random seed
+                    targetCount
+                );
+                const wasmEnd = performance.now();
+                wasmTimeAvg = wasmTimeAvg * 0.9 + (wasmEnd - wasmStart) * 0.1;
+
+                // Get particle data from WASM memory
+                const ptr = simulator.get_particles_ptr();
+                const len = simulator.get_particles_len();
+                const particles = new Float32Array(wasm.memory.buffer, ptr, len);
+
+                // Upload to WebGL
+                const renderStart = performance.now();
+                gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+                gl.bufferSubData(gl.ARRAY_BUFFER, 0, particles);
+
+                // Clear and render
+                gl.clearColor(0.1, 0.1, 0.15, 1.0);
+                gl.clear(gl.COLOR_BUFFER_BIT);
+
+                gl.useProgram(program);
+                gl.uniform2f(boundsMinLoc, boundsMinX, boundsMinY);
+                gl.uniform2f(boundsMaxLoc, boundsMaxX, boundsMaxY);
+                gl.uniform1f(pointSizeLoc, pointSize * window.devicePixelRatio);
+                gl.uniform1f(maxAgeLoc, maxAge);
+
+                gl.bindVertexArray(vao);
+                gl.drawArrays(gl.POINTS, 0, MAX_PARTICLES);
+                const renderEnd = performance.now();
+                renderTimeAvg = renderTimeAvg * 0.9 + (renderEnd - renderStart) * 0.1;
+
+                // FPS counter
+                frameCount++;
+                if (now - lastFpsTime > 1000) {
+                    document.getElementById('fps').textContent = frameCount;
+                    document.getElementById('activeParticles').textContent = targetCount;
+                    document.getElementById('wasmTime').textContent = wasmTimeAvg.toFixed(2) + ' ms';
+                    document.getElementById('renderTime').textContent = renderTimeAvg.toFixed(2) + ' ms';
+                    frameCount = 0;
+                    lastFpsTime = now;
+                }
+
+                requestAnimationFrame(frame);
+            }
+
+            frame();
+        }
+
+        main().catch(console.error);
+    </script>
+</body>
+</html>

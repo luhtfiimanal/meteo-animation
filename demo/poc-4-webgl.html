@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>POC 4 - WebGL + WASM Map Coordinate Sync</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #1a1a2e;
+            color: white;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            overflow: hidden;
+        }
+        .container { display: flex; height: 100vh; }
+        .controls {
+            width: 320px;
+            padding: 20px;
+            background: #16213e;
+            overflow-y: auto;
+        }
+        .canvas-container { flex: 1; position: relative; }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            cursor: grab;
+        }
+        canvas:active { cursor: grabbing; }
+        h1 { font-size: 1.2em; margin-bottom: 20px; color: #60a5fa; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-size: 0.9em; color: #a0aec0; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        .value { font-size: 0.85em; color: #60a5fa; }
+        .stats {
+            background: #0f3460;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 0.9em;
+        }
+        .stat-label { color: #a0aec0; }
+        .stat-value { color: #60a5fa; font-family: monospace; }
+        .legend {
+            margin-top: 20px;
+            padding: 15px;
+            background: #0f3460;
+            border-radius: 8px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+            font-size: 0.85em;
+        }
+        .legend-color {
+            width: 20px;
+            height: 4px;
+            margin-right: 10px;
+            border-radius: 2px;
+        }
+        .info-box {
+            background: rgba(96, 165, 250, 0.15);
+            border: 1px solid #60a5fa;
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 15px;
+            font-size: 0.85em;
+        }
+        .info-box h3 {
+            color: #60a5fa;
+            margin-bottom: 8px;
+            font-size: 0.95em;
+        }
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 1.5em;
+        }
+        .debug-overlay {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="controls">
+            <h1>POC 4: Map Coordinate Sync</h1>
+            <p style="font-size: 0.85em; color: #a0aec0; margin-bottom: 20px;">
+                Pan: drag canvas<br>
+                Zoom: scroll wheel<br>
+                World coords (Web Mercator)
+            </p>
+
+            <div class="control-group">
+                <label>Particle Count: <span id="countValue">500</span></label>
+                <input type="range" id="particleCount" min="100" max="3000" value="500" step="100">
+            </div>
+
+            <div class="control-group">
+                <label>Trail Width: <span id="trailWidthValue">3</span></label>
+                <input type="range" id="trailWidth" min="1" max="10" value="3" step="0.5">
+            </div>
+
+            <div class="control-group">
+                <label>Trail Opacity: <span id="opacityValue">0.8</span></label>
+                <input type="range" id="opacity" min="0.1" max="1.0" value="0.8" step="0.1">
+            </div>
+
+            <div class="control-group">
+                <label>Wind Speed: <span id="windSpeedValue">50</span></label>
+                <input type="range" id="windSpeed" min="10" max="200" value="50" step="10">
+            </div>
+
+            <div class="control-group">
+                <label>Max Age: <span id="maxAgeValue">80</span></label>
+                <input type="range" id="maxAge" min="20" max="150" value="80" step="10">
+            </div>
+
+            <div class="control-group">
+                <label>NaN Region Size: <span id="nanSizeValue">20</span>%</label>
+                <input type="range" id="nanSize" min="0" max="50" value="20" step="5">
+            </div>
+
+            <div class="stats">
+                <div class="stat-row">
+                    <span class="stat-label">FPS:</span>
+                    <span class="stat-value" id="fps">0</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Active Particles:</span>
+                    <span class="stat-value" id="activeParticles">0</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">View Scale:</span>
+                    <span class="stat-value" id="viewScaleDisplay">0</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">View Offset:</span>
+                    <span class="stat-value" id="viewOffsetDisplay">0, 0</span>
+                </div>
+            </div>
+
+            <div class="info-box">
+                <h3>Key Insight</h3>
+                <p>WASM modules unchanged - they work with any coordinate system. View transform is applied in shader.</p>
+            </div>
+
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-color" style="background: linear-gradient(90deg, #60a5fa, #60a5fa00);"></div>
+                    <span>Trail (HEAD to TAIL fade)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #374151;"></div>
+                    <span>NaN Region (No Data)</span>
+                </div>
+            </div>
+        </div>
+        <div class="canvas-container">
+            <canvas id="canvas"></canvas>
+            <div class="loading" id="loading">Loading WASM...</div>
+            <div class="debug-overlay" id="debug">
+                Mouse World: (0, 0)
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, {
+            ParticleSimulator,
+            WindSampler,
+            TrailManager,
+            TrailVertexBuilder
+        } from '../crates/meteo-animation-wasm/pkg/meteo_animation_wasm.js';
+
+        // =========================================================================
+        // World Coordinate System
+        // =========================================================================
+
+        // World bounds (Web Mercator-like, 1000x1000 units for demo)
+        const WORLD_SIZE = 1000;
+        const WORLD_BOUNDS = {
+            minX: 0,
+            minY: 0,
+            maxX: WORLD_SIZE,
+            maxY: WORLD_SIZE
+        };
+
+        // =========================================================================
+        // Generate Wind Texture with NaN Regions (in world coords)
+        // =========================================================================
+
+        function generateWindTexture(size, nanPercent, windSpeedMax = 10) {
+            const data = new Uint8Array(size * size * 4);
+
+            const nanRegions = [];
+            const numRegions = Math.floor(2 + Math.random() * 3);
+            const regionRadius = size * Math.sqrt(nanPercent / 100 / numRegions / Math.PI);
+
+            for (let i = 0; i < numRegions; i++) {
+                nanRegions.push({
+                    x: Math.random() * size,
+                    y: Math.random() * size,
+                    r: regionRadius * (0.5 + Math.random())
+                });
+            }
+
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    const idx = (y * size + x) * 4;
+
+                    let isNaN = false;
+                    for (const region of nanRegions) {
+                        const dx = x - region.x;
+                        const dy = y - region.y;
+                        if (dx * dx + dy * dy < region.r * region.r) {
+                            isNaN = true;
+                            break;
+                        }
+                    }
+
+                    if (isNaN) {
+                        data[idx + 0] = 128;
+                        data[idx + 1] = 128;
+                        data[idx + 2] = 0;
+                        data[idx + 3] = 0;
+                    } else {
+                        const cx = size / 2;
+                        const cy = size / 2;
+                        const dx = x - cx;
+                        const dy = y - cy;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        const angle = Math.atan2(dy, dx) + Math.PI / 2;
+
+                        const windStrength = (0.5 + 0.3 * Math.sin(dist / 20)) * windSpeedMax;
+                        const u = Math.cos(angle) * windStrength;
+                        const v = Math.sin(angle) * windStrength;
+
+                        data[idx + 0] = Math.floor(Math.max(0, Math.min(255, (u + 15) / 30 * 255)));
+                        data[idx + 1] = Math.floor(Math.max(0, Math.min(255, (v + 15) / 30 * 255)));
+                        data[idx + 2] = Math.floor(Math.min(255, windStrength / 15 * 255));
+                        data[idx + 3] = 255;
+                    }
+                }
+            }
+
+            return { data, nanRegions };
+        }
+
+        // =========================================================================
+        // WebGL Shaders - With View Transform
+        // =========================================================================
+
+        // Background shader - converts clip -> world -> texcoord
+        const BG_VERTEX_SHADER = `#version 300 es
+            out vec2 v_clipPos;
+            void main() {
+                vec2 positions[6] = vec2[](
+                    vec2(-1, -1), vec2(1, -1), vec2(-1, 1),
+                    vec2(-1, 1), vec2(1, -1), vec2(1, 1)
+                );
+                gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);
+                v_clipPos = positions[gl_VertexID];
+            }
+        `;
+
+        const BG_FRAGMENT_SHADER = `#version 300 es
+            precision mediump float;
+            in vec2 v_clipPos;
+            out vec4 fragColor;
+
+            uniform sampler2D u_wind_texture;
+            uniform vec2 u_view_offset;
+            uniform float u_view_scale;
+            uniform vec2 u_screen_size;
+            uniform vec2 u_texture_bounds_min;
+            uniform vec2 u_texture_bounds_max;
+
+            void main() {
+                // Clip -> Screen (device pixels)
+                vec2 screen = (v_clipPos * 0.5 + 0.5) * u_screen_size;
+                screen.y = u_screen_size.y - screen.y;  // Flip Y
+
+                // Screen -> World
+                vec2 world = (screen - u_screen_size * 0.5) / u_view_scale + u_view_offset;
+
+                // World -> TexCoord
+                vec2 texCoord = (world - u_texture_bounds_min) / (u_texture_bounds_max - u_texture_bounds_min);
+
+                // Check out of bounds
+                if (texCoord.x < 0.0 || texCoord.x > 1.0 || texCoord.y < 0.0 || texCoord.y > 1.0) {
+                    fragColor = vec4(0.04, 0.04, 0.08, 1.0);
+                    return;
+                }
+
+                vec4 wind = texture(u_wind_texture, texCoord);
+                if (wind.a < 0.5) {
+                    fragColor = vec4(0.12, 0.12, 0.18, 1.0);
+                } else {
+                    float mag = wind.b;
+                    fragColor = vec4(0.04 + mag * 0.03, 0.05 + mag * 0.04, 0.10 + mag * 0.05, 1.0);
+                }
+            }
+        `;
+
+        // Trail shader - receives world coords, applies view transform
+        const TRAIL_VERTEX_SHADER = `#version 300 es
+            precision highp float;
+
+            in vec2 a_position;      // World coordinates
+            in float a_alpha;
+            in vec3 a_color;
+
+            // View transform uniforms
+            uniform vec2 u_view_offset;    // World coord at screen center
+            uniform float u_view_scale;    // Device pixels per world unit
+            uniform vec2 u_screen_size;    // Canvas size in device pixels
+
+            out vec4 v_color;
+
+            void main() {
+                // World -> Screen
+                vec2 screen = (a_position - u_view_offset) * u_view_scale + u_screen_size * 0.5;
+
+                // Screen -> Clip
+                vec2 clip = screen / u_screen_size * 2.0 - 1.0;
+
+                gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+                v_color = vec4(a_color, a_alpha);
+            }
+        `;
+
+        const TRAIL_FRAGMENT_SHADER = `#version 300 es
+            precision mediump float;
+            in vec4 v_color;
+            out vec4 fragColor;
+
+            void main() {
+                fragColor = v_color;
+            }
+        `;
+
+        // =========================================================================
+        // Shader Helpers
+        // =========================================================================
+
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error('Shader compile error:', gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+        function createProgram(gl, vs, fs) {
+            const program = gl.createProgram();
+            gl.attachShader(program, vs);
+            gl.attachShader(program, fs);
+            gl.linkProgram(program);
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error('Program link error:', gl.getProgramInfoLog(program));
+                gl.deleteProgram(program);
+                return null;
+            }
+            return program;
+        }
+
+        // =========================================================================
+        // Main
+        // =========================================================================
+
+        async function main() {
+            const wasm = await init();
+            document.getElementById('loading').style.display = 'none';
+
+            const canvas = document.getElementById('canvas');
+            const gl = canvas.getContext('webgl2');
+            if (!gl) {
+                alert('WebGL 2 not supported!');
+                return;
+            }
+
+            // CRITICAL: Proper canvas sizing
+            function resize() {
+                const rect = canvas.getBoundingClientRect();
+                canvas.width = rect.width * window.devicePixelRatio;
+                canvas.height = rect.height * window.devicePixelRatio;
+                gl.viewport(0, 0, canvas.width, canvas.height);
+            }
+            resize();
+            window.addEventListener('resize', resize);
+
+            // ==================== View State ====================
+            let viewOffset = { x: WORLD_SIZE / 2, y: WORLD_SIZE / 2 };  // Center of world
+            let viewScale = Math.min(canvas.width, canvas.height) / WORLD_SIZE * 0.8;  // Fit world in view
+
+            // ==================== Background Program ====================
+            const bgVs = createShader(gl, gl.VERTEX_SHADER, BG_VERTEX_SHADER);
+            const bgFs = createShader(gl, gl.FRAGMENT_SHADER, BG_FRAGMENT_SHADER);
+            const bgProgram = createProgram(gl, bgVs, bgFs);
+
+            const bgLocs = {
+                windTex: gl.getUniformLocation(bgProgram, 'u_wind_texture'),
+                viewOffset: gl.getUniformLocation(bgProgram, 'u_view_offset'),
+                viewScale: gl.getUniformLocation(bgProgram, 'u_view_scale'),
+                screenSize: gl.getUniformLocation(bgProgram, 'u_screen_size'),
+                texBoundsMin: gl.getUniformLocation(bgProgram, 'u_texture_bounds_min'),
+                texBoundsMax: gl.getUniformLocation(bgProgram, 'u_texture_bounds_max'),
+            };
+
+            // ==================== Trail Program ====================
+            const trailVs = createShader(gl, gl.VERTEX_SHADER, TRAIL_VERTEX_SHADER);
+            const trailFs = createShader(gl, gl.FRAGMENT_SHADER, TRAIL_FRAGMENT_SHADER);
+            const trailProgram = createProgram(gl, trailVs, trailFs);
+
+            const trailLocs = {
+                position: gl.getAttribLocation(trailProgram, 'a_position'),
+                alpha: gl.getAttribLocation(trailProgram, 'a_alpha'),
+                color: gl.getAttribLocation(trailProgram, 'a_color'),
+                viewOffset: gl.getUniformLocation(trailProgram, 'u_view_offset'),
+                viewScale: gl.getUniformLocation(trailProgram, 'u_view_scale'),
+                screenSize: gl.getUniformLocation(trailProgram, 'u_screen_size'),
+            };
+
+            // ==================== Trail VAO & Buffer ====================
+            const trailVao = gl.createVertexArray();
+            gl.bindVertexArray(trailVao);
+
+            const trailBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, trailBuffer);
+
+            const FLOATS_PER_VERTEX = 6;
+            const STRIDE = FLOATS_PER_VERTEX * 4;
+
+            gl.enableVertexAttribArray(trailLocs.position);
+            gl.vertexAttribPointer(trailLocs.position, 2, gl.FLOAT, false, STRIDE, 0);
+            gl.enableVertexAttribArray(trailLocs.alpha);
+            gl.vertexAttribPointer(trailLocs.alpha, 1, gl.FLOAT, false, STRIDE, 8);
+            gl.enableVertexAttribArray(trailLocs.color);
+            gl.vertexAttribPointer(trailLocs.color, 3, gl.FLOAT, false, STRIDE, 12);
+
+            // ==================== WASM Objects ====================
+            const MAX_PARTICLES = 3000;
+            const TRAIL_LENGTH = 16;
+
+            const simulator = new ParticleSimulator(MAX_PARTICLES);
+            const trails = new TrailManager(MAX_PARTICLES, TRAIL_LENGTH);
+            const vertexBuilder = new TrailVertexBuilder(MAX_PARTICLES, TRAIL_LENGTH);
+
+            const maxVertices = MAX_PARTICLES * (TRAIL_LENGTH - 1) * 6;
+            gl.bufferData(gl.ARRAY_BUFFER, maxVertices * STRIDE, gl.DYNAMIC_DRAW);
+
+            // ==================== Wind Texture + WindSampler ====================
+            const WIND_TEX_SIZE = 256;
+            const windTexture = gl.createTexture();
+            const windSampler = new WindSampler(WIND_TEX_SIZE, WIND_TEX_SIZE);
+
+            // Set bounds to WORLD coordinates (not pixels!)
+            windSampler.set_bounds(WORLD_BOUNDS.minX, WORLD_BOUNDS.minY, WORLD_BOUNDS.maxX, WORLD_BOUNDS.maxY);
+
+            function regenerateWindTexture(nanPercent) {
+                const { data } = generateWindTexture(WIND_TEX_SIZE, nanPercent, 10);
+
+                gl.bindTexture(gl.TEXTURE_2D, windTexture);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, WIND_TEX_SIZE, WIND_TEX_SIZE, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+                windSampler.set_data(data);
+            }
+
+            regenerateWindTexture(20);
+
+            // ==================== Pan/Zoom Handling ====================
+            let isPanning = false;
+            let lastMouseX = 0;
+            let lastMouseY = 0;
+
+            canvas.addEventListener('mousedown', (e) => {
+                isPanning = true;
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+            });
+
+            canvas.addEventListener('mousemove', (e) => {
+                // Update debug overlay with world coords
+                const rect = canvas.getBoundingClientRect();
+                const cssToDeviceX = canvas.width / rect.width;
+                const cssToDeviceY = canvas.height / rect.height;
+
+                const screenX = (e.clientX - rect.left) * cssToDeviceX;
+                const screenY = (e.clientY - rect.top) * cssToDeviceY;
+
+                const worldX = (screenX - canvas.width / 2) / viewScale + viewOffset.x;
+                const worldY = (screenY - canvas.height / 2) / viewScale + viewOffset.y;
+
+                document.getElementById('debug').textContent =
+                    `Mouse World: (${worldX.toFixed(1)}, ${worldY.toFixed(1)})`;
+
+                if (!isPanning) return;
+
+                const dx = e.clientX - lastMouseX;
+                const dy = e.clientY - lastMouseY;
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+
+                // Convert CSS pixel delta to world delta
+                viewOffset.x -= (dx * cssToDeviceX) / viewScale;
+                viewOffset.y -= (dy * cssToDeviceY) / viewScale;
+            });
+
+            canvas.addEventListener('mouseup', () => { isPanning = false; });
+            canvas.addEventListener('mouseleave', () => { isPanning = false; });
+
+            canvas.addEventListener('wheel', (e) => {
+                e.preventDefault();
+
+                const factor = e.deltaY > 0 ? 0.9 : 1.1;
+                viewScale *= factor;
+
+                // Clamp zoom
+                const minScale = 0.1;
+                const maxScale = 100;
+                viewScale = Math.max(minScale, Math.min(maxScale, viewScale));
+            }, { passive: false });
+
+            // Reset view on double click
+            canvas.addEventListener('dblclick', () => {
+                viewOffset = { x: WORLD_SIZE / 2, y: WORLD_SIZE / 2 };
+                viewScale = Math.min(canvas.width, canvas.height) / WORLD_SIZE * 0.8;
+            });
+
+            // ==================== Controls ====================
+            const particleCountSlider = document.getElementById('particleCount');
+            const trailWidthSlider = document.getElementById('trailWidth');
+            const opacitySlider = document.getElementById('opacity');
+            const windSpeedSlider = document.getElementById('windSpeed');
+            const maxAgeSlider = document.getElementById('maxAge');
+            const nanSizeSlider = document.getElementById('nanSize');
+
+            particleCountSlider.oninput = () => document.getElementById('countValue').textContent = particleCountSlider.value;
+            trailWidthSlider.oninput = () => document.getElementById('trailWidthValue').textContent = trailWidthSlider.value;
+            opacitySlider.oninput = () => document.getElementById('opacityValue').textContent = opacitySlider.value;
+            windSpeedSlider.oninput = () => document.getElementById('windSpeedValue').textContent = windSpeedSlider.value;
+            maxAgeSlider.oninput = () => document.getElementById('maxAgeValue').textContent = maxAgeSlider.value;
+            nanSizeSlider.oninput = () => {
+                document.getElementById('nanSizeValue').textContent = nanSizeSlider.value;
+                regenerateWindTexture(parseInt(nanSizeSlider.value));
+            };
+
+            // ==================== Blending ====================
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+            // ==================== Stats ====================
+            let frameCount = 0;
+            let lastFpsTime = performance.now();
+
+            // ==================== Animation Loop ====================
+            let lastTime = performance.now();
+
+            function frame() {
+                const now = performance.now();
+                const deltaTime = (now - lastTime) / 1000;
+                lastTime = now;
+
+                const targetCount = parseInt(particleCountSlider.value);
+                const trailWidth = parseFloat(trailWidthSlider.value);
+                const opacity = parseFloat(opacitySlider.value);
+                const windSpeed = parseFloat(windSpeedSlider.value);
+                const maxAge = parseFloat(maxAgeSlider.value);
+
+                // Trail width in world units (scale with view)
+                const worldTrailWidth = trailWidth / viewScale;
+
+                // ==================== WASM Update (World Coords) ====================
+                simulator.update_with_trails(
+                    windSampler,
+                    trails,
+                    WORLD_BOUNDS.minX, WORLD_BOUNDS.minY,
+                    WORLD_BOUNDS.maxX, WORLD_BOUNDS.maxY,
+                    deltaTime,
+                    windSpeed,
+                    maxAge,
+                    now / 1000,
+                    targetCount
+                );
+
+                // Build vertices (outputs world coords)
+                vertexBuilder.build(
+                    trails,
+                    targetCount,
+                    worldTrailWidth,
+                    opacity,
+                    0.376, 0.647, 0.980
+                );
+
+                const vertexCount = vertexBuilder.get_vertex_count();
+                const ptr = vertexBuilder.get_vertices_ptr();
+                const vertices = new Float32Array(wasm.memory.buffer, ptr, vertexCount * FLOATS_PER_VERTEX);
+
+                // ==================== Render ====================
+                gl.clearColor(0.02, 0.02, 0.05, 1.0);
+                gl.clear(gl.COLOR_BUFFER_BIT);
+
+                // Draw background
+                gl.useProgram(bgProgram);
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_2D, windTexture);
+                gl.uniform1i(bgLocs.windTex, 0);
+                gl.uniform2f(bgLocs.viewOffset, viewOffset.x, viewOffset.y);
+                gl.uniform1f(bgLocs.viewScale, viewScale);
+                gl.uniform2f(bgLocs.screenSize, canvas.width, canvas.height);
+                gl.uniform2f(bgLocs.texBoundsMin, WORLD_BOUNDS.minX, WORLD_BOUNDS.minY);
+                gl.uniform2f(bgLocs.texBoundsMax, WORLD_BOUNDS.maxX, WORLD_BOUNDS.maxY);
+                gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+                // Draw trails
+                if (vertexCount > 0) {
+                    gl.bindBuffer(gl.ARRAY_BUFFER, trailBuffer);
+                    gl.bufferSubData(gl.ARRAY_BUFFER, 0, vertices);
+
+                    gl.useProgram(trailProgram);
+                    gl.uniform2f(trailLocs.viewOffset, viewOffset.x, viewOffset.y);
+                    gl.uniform1f(trailLocs.viewScale, viewScale);
+                    gl.uniform2f(trailLocs.screenSize, canvas.width, canvas.height);
+
+                    gl.bindVertexArray(trailVao);
+                    gl.drawArrays(gl.TRIANGLES, 0, vertexCount);
+                }
+
+                // FPS counter
+                frameCount++;
+                if (now - lastFpsTime > 1000) {
+                    document.getElementById('fps').textContent = frameCount;
+                    document.getElementById('activeParticles').textContent = targetCount;
+                    document.getElementById('viewScaleDisplay').textContent = viewScale.toFixed(2);
+                    document.getElementById('viewOffsetDisplay').textContent =
+                        `${viewOffset.x.toFixed(0)}, ${viewOffset.y.toFixed(0)}`;
+                    frameCount = 0;
+                    lastFpsTime = now;
+                }
+
+                requestAnimationFrame(frame);
+            }
+
+            frame();
+        }
+
+        main().catch(console.error);
+    </script>
+</body>
+</html>

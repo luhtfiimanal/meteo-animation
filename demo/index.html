@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>meteo-animation - Demo Index</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      color: #eee;
+      min-height: 100vh;
+      padding: 40px;
+    }
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    h1 {
+      font-size: 32px;
+      margin-bottom: 8px;
+    }
+    .subtitle {
+      color: #888;
+      margin-bottom: 12px;
+    }
+    .tech-badge {
+      display: inline-block;
+      padding: 6px 12px;
+      background: rgba(96, 165, 250, 0.2);
+      color: #60a5fa;
+      border-radius: 6px;
+      font-size: 13px;
+      margin-bottom: 30px;
+    }
+    .card-grid {
+      display: grid;
+      gap: 20px;
+    }
+    .card {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 12px;
+      padding: 24px;
+      text-decoration: none;
+      color: inherit;
+      transition: all 0.2s ease;
+    }
+    .card:hover {
+      background: rgba(255,255,255,0.1);
+      border-color: #e94560;
+      transform: translateY(-2px);
+    }
+    .card h2 {
+      font-size: 18px;
+      margin-bottom: 8px;
+      color: #e94560;
+    }
+    .card p {
+      font-size: 14px;
+      color: #aaa;
+      line-height: 1.5;
+    }
+    .tag {
+      display: inline-block;
+      padding: 4px 8px;
+      background: rgba(96, 165, 250, 0.2);
+      color: #60a5fa;
+      border-radius: 4px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-top: 12px;
+    }
+    .status-todo { background: rgba(148, 163, 184, 0.2); color: #94a3b8; }
+    .section-title {
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #666;
+      margin-bottom: 16px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+    }
+    .legacy-note {
+      margin-top: 40px;
+      padding: 16px;
+      background: rgba(255,255,255,0.02);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 8px;
+      font-size: 13px;
+      color: #666;
+    }
+    .legacy-note a {
+      color: #60a5fa;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>meteo-animation</h1>
+    <p class="subtitle">Wind Particle Animation Library</p>
+    <div class="tech-badge">Rust WASM + WebGL 2 (106 tests)</div>
+
+    <p class="section-title">Proof of Concept Demos</p>
+    <div class="card-grid">
+      <a href="poc-1-webgl.html" class="card">
+        <h2>POC 1: Particle Boundary</h2>
+        <p>
+          WebGL 2 + Rust WASM migration. Particle simulation in Rust,
+          rendered with WebGL point sprites. State machine: active, exiting, respawning.
+        </p>
+        <span class="tag">18 Tests</span>
+      </a>
+
+      <a href="poc-2-webgl.html" class="card">
+        <h2>POC 2: NaN Handling</h2>
+        <p>
+          Wind texture with NaN regions. WindSampler with bilinear
+          interpolation. Background shader shows valid/invalid regions.
+        </p>
+        <span class="tag">23 Tests</span>
+      </a>
+
+      <a href="poc-3-webgl.html" class="card">
+        <h2>POC 3: Wind Trails</h2>
+        <p>
+          TrailManager with shift approach. Quad rendering with
+          alpha fade and width taper.
+        </p>
+        <span class="tag">21 Tests</span>
+      </a>
+
+      <a href="poc-4-webgl.html" class="card">
+        <h2>POC 4: Map Coordinate Sync</h2>
+        <p>
+          World coordinates with pan/zoom. View transform in shader.
+          No WASM changes - modules are coordinate-agnostic.
+        </p>
+        <span class="tag">Reuses POC 3</span>
+      </a>
+
+      <a href="poc-5-webgl.html" class="card">
+        <h2>POC 5: Leaflet Integration</h2>
+        <p>
+          Full Leaflet map with OSM tiles. Zoom-based particle scaling.
+          No WASM changes - reuses all POC 1-4 modules.
+        </p>
+        <span class="tag">Reuses POC 4</span>
+      </a>
+
+      <a href="poc-6-webgl.html" class="card">
+        <h2>POC 6: Dynamic Atlas + Tiles</h2>
+        <p>
+          FixedAtlas with viewport resampling. Tile loading with LRU cache.
+          Auto-load on pan/zoom, performance metrics, mobile support.
+        </p>
+        <span class="tag">40 Tests</span>
+      </a>
+
+      <a href="#" class="card" style="opacity: 0.5; pointer-events: none;">
+        <h2>POC 7: Unified API</h2>
+        <p>
+          WindAnimation struct combining ParticleSimulator, TrailManager,
+          WindSampler, and TrailVertexBuilder into simple library API.
+        </p>
+        <span class="tag status-todo">Coming Soon</span>
+      </a>
+    </div>
+
+    <div class="legacy-note">
+      Looking for the WebGPU version? See the
+      <a href="https://github.com/luhtfiimanal/meteo-animation/tree/webgpu-legacy">webgpu-legacy</a>
+      branch.
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,39 @@
+# Build and Release WASM artifacts
+# Triggered when a version tag (v*) is pushed
+name: Build and Release WASM
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:  # Allow manual trigger for testing
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack
+
+      - name: Build WASM (release)
+        run: |
+          cd crates/meteo-animation-wasm
+          wasm-pack build --target web --release
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            crates/meteo-animation-wasm/pkg/meteo_animation_wasm_bg.wasm
+            crates/meteo-animation-wasm/pkg/meteo_animation_wasm.js
+            crates/meteo-animation-wasm/pkg/meteo_animation_wasm.d.ts
+          generate_release_notes: true

@@ -1,0 +1,54 @@
+{
+  "name": "meteo-animation",
+  "version": "0.2.0",
+  "description": "WebGPU-based particle animation for wind and ocean current visualization",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "tsc && vite build",
+    "type-check": "tsc --noEmit",
+    "lint": "eslint src --ext .ts",
+    "demo": "vite --config vite.demo.config.ts",
+    "demo:preview": "vite preview --config vite.demo.config.ts",
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "test:headed": "playwright test --headed"
+  },
+  "peerDependencies": {
+    "leaflet": "^1.9.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.57.0",
+    "@types/leaflet": "^1.9.8",
+    "@webgpu/types": "^0.1.40",
+    "leaflet": "^1.9.4",
+    "typescript": "^5.3.3",
+    "vite": "^5.4.11",
+    "vite-plugin-dts": "^3.9.1"
+  },
+  "keywords": [
+    "webgpu",
+    "leaflet",
+    "wind",
+    "ocean-current",
+    "particle",
+    "animation"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicholascw/meteo-animation.git"
+  }
+}
