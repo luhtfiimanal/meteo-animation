@@ -567,6 +567,10 @@
         let pendingLoadRequest = null;
         const AUTO_LOAD_DEBOUNCE_MS = 300;
 
+        // Atlas update debounce
+        let pendingAtlasUpdate = null;
+        const ATLAS_UPDATE_DEBOUNCE_MS = 100;  // Faster than tile load
+
         // Performance tracking
         const perf = {
             tileLoadTimes: [],       // Rolling array of last N tile load times
@@ -679,10 +683,16 @@
                     canvas.style.transform = '';
                     canvas.style.transformOrigin = '';
                 }
-                // Update atlas on move
-                updateAtlas();
-                // Schedule auto-load if enabled
-                scheduleAutoLoad();
+                // Debounce atlas update to reduce churn during rapid panning
+                if (pendingAtlasUpdate) {
+                    clearTimeout(pendingAtlasUpdate);
+                }
+                pendingAtlasUpdate = setTimeout(() => {
+                    pendingAtlasUpdate = null;
+                    updateAtlas();
+                    // Schedule auto-load if enabled
+                    scheduleAutoLoad();
+                }, ATLAS_UPDATE_DEBOUNCE_MS);
             });
 
             // Initialize WebGL
@@ -853,8 +863,9 @@
                 gl.clearColor(0, 0, 0, 0);
                 gl.clear(gl.COLOR_BUFFER_BIT);
 
-                // Update wind texture from fixedAtlas
-                if (fixedAtlas && fixedAtlas.get_width() > 0) {
+                // Update wind texture ONLY when fixedAtlas is dirty
+                // This eliminates 256KB GPU uploads every frame (60 fps)
+                if (fixedAtlas && fixedAtlas.get_width() > 0 && fixedAtlas.is_dirty()) {
                     const texWidth = fixedAtlas.get_width();
                     const texHeight = fixedAtlas.get_height();
                     const dataPtr = fixedAtlas.get_data_ptr();
@@ -870,9 +881,12 @@
                             lastWindTexWidth = texWidth;
                             lastWindTexHeight = texHeight;
                         } else {
-                            // Update existing (every frame - fixedAtlas data may have changed)
+                            // Update existing (only when data changed)
                             gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, texWidth, texHeight, gl.RGBA, gl.UNSIGNED_BYTE, texData);
                         }
+
+                        // Clear dirty flag after update
+                        fixedAtlas.clear_dirty();
                     }
                 }
 
@@ -1121,15 +1135,20 @@
         function updateWindSamplerFromFixedAtlas() {
             if (windSampler) {
                 const windStart = performance.now();
+
+                // Update bounds (cheap - just 4 floats)
                 windSampler.set_bounds(
                     fixedAtlas.get_bounds_min_x(),
                     fixedAtlas.get_bounds_min_y(),
                     fixedAtlas.get_bounds_max_x(),
                     fixedAtlas.get_bounds_max_y()
                 );
-                // Use get_data_copy() - returns a safe copy
+
+                // Copy data (expensive - 256KB)
+                // Called only when atlas data changes (from updateAtlas or loadTiles)
                 const data = fixedAtlas.get_data_copy();
                 windSampler.set_data(data);
+
                 perf.lastWindUpdateTime = performance.now() - windStart;
             }
         }
