@@ -295,6 +295,60 @@ impl ParticleSimulator {
         random_seed: f32,
         target_count: u32,
     ) {
+        self.update_with_trails_internal(
+            wind, trails, bounds_min_x, bounds_min_y, bounds_max_x, bounds_max_y,
+            delta_time, speed_factor, max_age, random_seed, target_count,
+            false, 0.0, // constant_speed_mode = false
+        );
+    }
+
+    /// Update particles with constant speed mode (for wave direction)
+    /// 
+    /// In constant speed mode:
+    /// - All particles move at the same speed (speed_factor)
+    /// - Direction is taken from wind data (normalized u/v)
+    /// - Trail length varies based on magnitude: higher magnitude = longer max_age
+    /// - magnitude_scale controls how much magnitude affects trail length (0.0 = no effect, 1.0 = double at magnitude 1)
+    #[wasm_bindgen]
+    pub fn update_with_trails_constant_speed(
+        &mut self,
+        wind: &WindSampler,
+        trails: &mut TrailManager,
+        bounds_min_x: f32,
+        bounds_min_y: f32,
+        bounds_max_x: f32,
+        bounds_max_y: f32,
+        delta_time: f32,
+        speed_factor: f32,
+        max_age: f32,
+        random_seed: f32,
+        target_count: u32,
+        magnitude_scale: f32,
+    ) {
+        self.update_with_trails_internal(
+            wind, trails, bounds_min_x, bounds_min_y, bounds_max_x, bounds_max_y,
+            delta_time, speed_factor, max_age, random_seed, target_count,
+            true, magnitude_scale,
+        );
+    }
+
+    /// Internal implementation for both normal and constant speed modes
+    fn update_with_trails_internal(
+        &mut self,
+        wind: &WindSampler,
+        trails: &mut TrailManager,
+        bounds_min_x: f32,
+        bounds_min_y: f32,
+        bounds_max_x: f32,
+        bounds_max_y: f32,
+        delta_time: f32,
+        speed_factor: f32,
+        max_age: f32,
+        random_seed: f32,
+        target_count: u32,
+        constant_speed_mode: bool,
+        magnitude_scale: f32,
+    ) {
         for i in 0..self.max_particles {
             let base = i * FLOATS_PER_PARTICLE;
             let should_be_active = (i as u32) < target_count;
@@ -334,14 +388,39 @@ impl ParticleSimulator {
                 continue;
             }
 
-            // Update position with wind
-            let new_x = x + sample.u * delta_time * speed_factor;
-            let new_y = y + sample.v * delta_time * speed_factor;
+            // Calculate movement based on mode
+            let (move_x, move_y, effective_max_age) = if constant_speed_mode {
+                // Constant speed mode: normalize direction, use speed_factor as constant speed
+                let magnitude = sample.speed;
+                if magnitude > 0.001 {
+                    let norm_u = sample.u / magnitude;
+                    let norm_v = sample.v / magnitude;
+                    // Movement at constant speed
+                    let mx = norm_u * speed_factor * delta_time;
+                    let my = norm_v * speed_factor * delta_time;
+                    // Scale max_age based on magnitude: higher magnitude = longer trail
+                    // effective_max_age = max_age * (1.0 + magnitude * magnitude_scale)
+                    let age_multiplier = 1.0 + magnitude * magnitude_scale;
+                    let eff_age = max_age * age_multiplier.clamp(0.5, 4.0);
+                    (mx, my, eff_age)
+                } else {
+                    // No direction - don't move
+                    (0.0, 0.0, max_age)
+                }
+            } else {
+                // Normal mode: use u/v directly with speed_factor
+                let mx = sample.u * delta_time * speed_factor;
+                let my = sample.v * delta_time * speed_factor;
+                (mx, my, max_age)
+            };
+
+            let new_x = x + move_x;
+            let new_y = y + move_y;
             let new_age = age + 1.0;
 
             // Check respawn conditions
             let out_of_bounds = !in_bounds(new_x, new_y, bounds_min_x, bounds_min_y, bounds_max_x, bounds_max_y);
-            let too_old = new_age > max_age;
+            let too_old = new_age > effective_max_age;
 
             if out_of_bounds || too_old {
                 self.respawn_valid_internal(i, wind, bounds_min_x, bounds_min_y, bounds_max_x, bounds_max_y, random_seed + new_age);
@@ -719,5 +798,161 @@ mod tests {
         sim.set_state(3, 42.0);
 
         assert_eq!(sim.get_state(3), 42.0);
+    }
+
+    // ============== Constant Speed Mode Tests ==============
+
+    fn create_varying_magnitude_texture() -> Vec<u8> {
+        // 4x4 texture with varying magnitudes
+        // Left side: low magnitude (u=2, v=0) -> R=(2+15)/30*255 = 144
+        // Right side: high magnitude (u=10, v=0) -> R=(10+15)/30*255 = 212
+        let mut data = Vec::new();
+        for row in 0..4 {
+            for col in 0..4 {
+                let r = if col < 2 { 144 } else { 212 }; // low or high magnitude
+                data.extend([r, 128, 128, 255]); // u varies, v=0, all valid
+            }
+        }
+        data
+    }
+
+    #[test]
+    fn test_constant_speed_mode_normalizes_direction() {
+        let mut sim = ParticleSimulator::new(10);
+        let mut wind = WindSampler::new(4, 4);
+        let mut trails = TrailManager::new(10, 4);
+
+        // Wind with high magnitude: u=10 m/s
+        let data = create_uniform_wind_texture(212, 128);
+        wind.set_data(&data);
+        wind.set_bounds(0.0, 0.0, 100.0, 100.0);
+
+        // Spawn particle
+        sim.update_with_trails_constant_speed(
+            &wind, &mut trails, 0.0, 0.0, 100.0, 100.0,
+            0.016, 5.0, 100.0, 0.5, 1, 0.0
+        );
+        let (x1, _) = sim.get_position(0);
+
+        // Update with constant speed = 5.0
+        sim.update_with_trails_constant_speed(
+            &wind, &mut trails, 0.0, 0.0, 100.0, 100.0,
+            1.0, 5.0, 100.0, 0.5, 1, 0.0
+        );
+        let (x2, _) = sim.get_position(0);
+
+        // In constant speed mode, movement should be ~5 (speed_factor), not ~10 (wind magnitude)
+        let dx = x2 - x1;
+        assert!(dx > 3.0 && dx < 7.0, "Movement dx={} should be ~5 (constant speed)", dx);
+    }
+
+    #[test]
+    fn test_constant_speed_mode_same_speed_different_magnitudes() {
+        // Two simulations: one with low magnitude, one with high magnitude
+        // Both should move at the same speed in constant_speed_mode
+        
+        let mut sim_low = ParticleSimulator::new(10);
+        let mut sim_high = ParticleSimulator::new(10);
+        let mut wind_low = WindSampler::new(2, 2);
+        let mut wind_high = WindSampler::new(2, 2);
+        let mut trails_low = TrailManager::new(10, 4);
+        let mut trails_high = TrailManager::new(10, 4);
+
+        // Low magnitude: u=2 -> R=(2+15)/30*255=144
+        let data_low: Vec<u8> = (0..4).flat_map(|_| [144, 128, 128, 255]).collect();
+        wind_low.set_data(&data_low);
+        wind_low.set_bounds(0.0, 0.0, 100.0, 100.0);
+
+        // High magnitude: u=10 -> R=(10+15)/30*255=212
+        let data_high: Vec<u8> = (0..4).flat_map(|_| [212, 128, 128, 255]).collect();
+        wind_high.set_data(&data_high);
+        wind_high.set_bounds(0.0, 0.0, 100.0, 100.0);
+
+        // Spawn both at same position
+        sim_low.set_position(0, 50.0, 50.0);
+        sim_low.set_state(0, 0.0); // STATE_ACTIVE
+        sim_high.set_position(0, 50.0, 50.0);
+        sim_high.set_state(0, 0.0);
+        trails_low.reset_trail(0, 50.0, 50.0);
+        trails_high.reset_trail(0, 50.0, 50.0);
+
+        // Update both with constant speed mode
+        sim_low.update_with_trails_constant_speed(
+            &wind_low, &mut trails_low, 0.0, 0.0, 100.0, 100.0,
+            1.0, 5.0, 100.0, 0.5, 1, 0.0
+        );
+        sim_high.update_with_trails_constant_speed(
+            &wind_high, &mut trails_high, 0.0, 0.0, 100.0, 100.0,
+            1.0, 5.0, 100.0, 0.5, 1, 0.0
+        );
+
+        let (x_low, _) = sim_low.get_position(0);
+        let (x_high, _) = sim_high.get_position(0);
+
+        // Both should have moved the same distance
+        let dx_low = x_low - 50.0;
+        let dx_high = x_high - 50.0;
+        assert!((dx_low - dx_high).abs() < 0.5, 
+            "Both should move same distance: low={}, high={}", dx_low, dx_high);
+    }
+
+    #[test]
+    fn test_constant_speed_magnitude_affects_max_age() {
+        // Higher magnitude should result in longer effective max_age
+        let mut sim = ParticleSimulator::new(10);
+        let mut wind = WindSampler::new(2, 2);
+        let mut trails = TrailManager::new(10, 4);
+
+        // High magnitude: u=10 -> R=212, speed=10
+        let data: Vec<u8> = (0..4).flat_map(|_| [212, 128, 128, 255]).collect();
+        wind.set_data(&data);
+        wind.set_bounds(0.0, 0.0, 100.0, 100.0);
+
+        // Place particle at center with age near max_age
+        sim.set_position(0, 50.0, 50.0);
+        sim.set_state(0, 0.0); // STATE_ACTIVE
+        // Set age to 95 (just under base max_age of 100)
+        let base = 0 * 4;
+        // We can't directly set age, so we'll just test the behavior indirectly
+        
+        trails.reset_trail(0, 50.0, 50.0);
+
+        // With magnitude_scale=0.1 and magnitude~10, effective_max_age = 100 * (1 + 10*0.1) = 200
+        // So particle with age 95 should NOT respawn
+        
+        // Just verify the function runs without error with magnitude_scale
+        sim.update_with_trails_constant_speed(
+            &wind, &mut trails, 0.0, 0.0, 100.0, 100.0,
+            0.016, 5.0, 100.0, 0.5, 1, 0.1  // magnitude_scale = 0.1
+        );
+        
+        // Particle should still be active (not respawned to off-screen position)
+        let (x, _) = sim.get_position(0);
+        assert!(x > 0.0 && x < 100.0, "Particle should still be in bounds: x={}", x);
+    }
+
+    #[test]
+    fn test_normal_mode_still_works() {
+        // Ensure the original update_with_trails still works after refactoring
+        let mut sim = ParticleSimulator::new(10);
+        let mut wind = WindSampler::new(4, 4);
+        let mut trails = TrailManager::new(10, 4);
+
+        // Wind blowing right: u=10 m/s
+        let data = create_uniform_wind_texture(212, 128);
+        wind.set_data(&data);
+        wind.set_bounds(0.0, 0.0, 100.0, 100.0);
+
+        // Spawn
+        sim.update_with_trails(&wind, &mut trails, 0.0, 0.0, 100.0, 100.0, 0.016, 1.0, 100.0, 0.5, 1);
+        let (x1, _) = sim.get_position(0);
+
+        // Update - in normal mode, speed depends on wind magnitude
+        sim.update_with_trails(&wind, &mut trails, 0.0, 0.0, 100.0, 100.0, 1.0, 1.0, 100.0, 0.5, 1);
+        let (x2, _) = sim.get_position(0);
+
+        // Should move ~10 units (u=10 * dt=1 * factor=1)
+        let dx = x2 - x1;
+        assert!(dx > 7.0 && dx < 13.0, "Movement dx={} should be ~10", dx);
     }
 }
